@@ -4,15 +4,16 @@ import sys
 import os
 import subprocess
 import sqlite3
+import random
 
 SID = 1
-URI = "REDACTED"
+URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
 
-def FileFinder(ts3conn, item):
+def file_finder(ts3conn, item):
     # Create a found files
     Directory = ""
     Found = []
-    for(dirpath, dirnames, filenames) in os.walk("S:\\TS Server 3-26-20\\files\\virtualserver_1\\"):
+    for(dirpath, dirnames, filenames) in os.walk("C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\teamspeak3-server_win64\\files\\virtualserver_1\\"):
         for filename in filenames:
             if item in filename:
                 Found.append(filename)
@@ -36,8 +37,33 @@ def FileFinder(ts3conn, item):
 
     return tokens[len(tokens) - 1]
 
-def DataBaseSearch(channelid):
-    conn = sqlite3.connect('ts3server.sqlitedb')
+def roll_dice(ts3conn, data):
+
+    dice = data["dice"]
+    user = data["user"]
+
+    numbers = dice.split("d")
+    num_die = int(numbers[0])
+    die_val = int(numbers[1])
+
+    output = "{user} rolled {dice} for {total}!"
+    sum_string = ""
+    total = 0
+
+    for i in range(num_die):
+        r = random.randint(1, die_val)
+        sum_string += str(r) 
+        if i != num_die - 1:
+            sum_string += " + "
+
+        total += r
+
+    output += " (" + sum_string + ")"
+
+    ts3conn.exec_("gm", msg=output.format(user=user, dice=dice, total=total))
+
+def database_search(channelid):
+    conn = sqlite3.connect('teamspeak3-server_win64\\ts3server.sqlitedb')
     c = conn.cursor()
     c.execute("SELECT * FROM channel_properties;")
     channelname = "error"
@@ -52,7 +78,7 @@ def DataBaseSearch(channelid):
     return channelname
 
 
-def FindBotStart(ts3conn):
+def start(ts3conn):
     ts3conn.exec_("servernotifyregister", event="textserver")
     while True:
         try:
@@ -64,10 +90,13 @@ def FindBotStart(ts3conn):
             message = event[0]["msg"]
             tokenized = message.split(" ")
 
-            # If the message contains these keywords begin work...
-            if "!find" in message or "!get" in message:
+            # Get command (the first string in msg)
+            command = tokenized[0]
+
+            # If the first token is the command !find or !get
+            if "!find" == command or "!get" == command: #
                 # Find the ID of the channel so we know where to look in the database
-                channelid = FileFinder(ts3conn, tokenized[1])
+                channelid = file_finder(ts3conn, tokenized[1])
 
                 # ChannelID > 0, so if < 0 the file wont exit
                 if channelid == 0:
@@ -77,7 +106,7 @@ def FindBotStart(ts3conn):
                 else:
 
                 # Connect to the database and look through the channel_properties
-                    Channel_Name = DataBaseSearch(int(channelid))
+                    Channel_Name = database_search(int(channelid))
                     if Channel_Name == "error":
                         ts3conn.exec_("gm", msg="Sorry, {}, There was an issue acccessing the server database.".format(event[0]["invokername"]))
 
@@ -87,11 +116,19 @@ def FindBotStart(ts3conn):
                     else:
                         pass
 
-            event[0]["msg"] = ""
+            elif "!roll" == command:
+                data = {
+                    "dice": tokenized[1],
+                    "user": event[0]["invokername"]
+                }
+                roll_dice(ts3conn, data)
+
+            # Don't think we need this
+            #event[0]["msg"] = "" 
 
     return
 
 if __name__ == "__main__":
     with ts3.query.TS3ServerConnection(URI) as ts3conn:
         ts3conn.exec_("use", sid=SID)
-        FindBotStart(ts3conn)
+        start(ts3conn)
