@@ -1,3 +1,5 @@
+# C C C C C C C C C C C C
+
 import ts3
 import time
 import sys
@@ -46,6 +48,19 @@ def roll_dice(ts3conn, data):
     num_die = int(numbers[0])
     die_val = int(numbers[1])
 
+    # Handle cases of funny people
+    if num_die < 1:
+        ts3conn.exec_("gm", msg="Throw atleast 1 die!")
+        return
+
+    if die_val < 1:
+        ts3conn.exec_("gm", msg="The universe has imploded!")
+        return
+
+    if die_val > 100:
+        ts3conn.exec_("gm", msg="That die is too large!")
+        return
+    
     output = "{user} rolled {dice} for {total}!"
     sum_string = ""
     total = 0
