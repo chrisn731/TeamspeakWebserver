@@ -15,9 +15,9 @@ URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
 
 # Maybe we make a file for everyone's classic lines
 evan_lines = []
-evan_txt = open("evan.txt", "r")
-for line in evan_txt:
-    evan_lines.append(line)
+with open("evan.txt", "r") as lines:
+    for line in lines:
+        evan_lines.append(line)
 
 def file_finder(ts3conn, item):
     # Create a found files
@@ -107,12 +107,17 @@ def database_search(channelid):
 
 def start(ts3conn):
     ts3conn.exec_("servernotifyregister", event="textserver")
+    #ts3conn.exec_("servernotifyregister", event="textchannel")
     while True:
         try:
             event = ts3conn.wait_for_event(timeout=60)
         except ts3.query.TS3TimeoutError:
             print("Timeout error, consider looking into keepalive log")
         else:
+
+            print(event)
+            print(event[0])
+
             # Look at all messages sent in server chat
             message = event[0]["msg"]
             tokenized = message.split(" ")
