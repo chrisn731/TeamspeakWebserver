@@ -11,6 +11,14 @@ import random
 SID = 1
 URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
 
+# rename this file to main plz
+
+# Maybe we make a file for everyone's classic lines
+evan_lines = []
+evan_txt = open("evan.txt", "r")
+for line in evan_txt:
+    evan_lines.append(line)
+
 def file_finder(ts3conn, item):
     # Create a found files
     Directory = ""
@@ -38,6 +46,10 @@ def file_finder(ts3conn, item):
                 ts3conn.exec_("gm", msg="{}".format(files))
 
     return tokens[len(tokens) - 1]
+
+def evan(ts3conn):
+    line = evan_lines[random.randint(0,len(evan_lines)-1)]
+    ts3conn.exec_("gm", msg=line)
 
 def roll_dice(ts3conn, data):
 
@@ -137,6 +149,9 @@ def start(ts3conn):
                     "user": event[0]["invokername"]
                 }
                 roll_dice(ts3conn, data)
+
+            elif "!evan" == command:
+                evan(ts3conn)
 
             # Don't think we need this
             #event[0]["msg"] = "" 
