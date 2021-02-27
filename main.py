@@ -15,12 +15,18 @@ SID = 1
 # Must be edited to suit your workstation.
 URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
 FILE_DIR = "C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\teamspeak3-server_win64\\files\\virtualserver_1\\"
+SAYINGS_DIR = "C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\sayings\\"
 
-# Maybe we make a file for everyone's classic lines
-evan_lines = []
-with open("evan.txt", "r") as lines:
-    for line in lines:
-        evan_lines.append(line)
+sayings = {}
+
+for(dirpath, dirnames, filenames) in os.walk(SAYINGS_DIR):
+    for filename in filenames:
+        with open(SAYINGS_DIR + filename, "r") as lines:
+            person = filename.split(".")[0].lower()
+            sayings_list = []
+            for line in lines:
+                sayings_list.append(line)
+            sayings[person] = sayings_list
 
 def file_finder(ts3conn, item):
     # Create a found files
@@ -50,8 +56,9 @@ def file_finder(ts3conn, item):
 
     return tokens[len(tokens) - 1]
 
-def evan(ts3conn):
-    line = evan_lines[random.randint(0,len(evan_lines)-1)]
+def say(ts3conn, person):
+    lines = sayings[person]
+    line = lines[random.randint(0,len(lines)-1)]
     ts3conn.exec_("gm", msg=line)
 
 def roll_dice(ts3conn, data):
@@ -66,6 +73,10 @@ def roll_dice(ts3conn, data):
     # Handle cases of funny people
     if num_die < 1:
         ts3conn.exec_("gm", msg="Throw atleast 1 die!")
+        return
+
+    if num_die > 1000:
+        ts3conn.exec_("gm", msg="Too many dice!")
         return
 
     if die_val < 1:
@@ -110,7 +121,7 @@ def database_search(channelid):
 
 def start(ts3conn):
     ts3conn.exec_("servernotifyregister", event="textserver")
-    #ts3conn.exec_("servernotifyregister", event="textchannel")
+    #ts3conn.exec_("servernotifyregister", event="channel", id=7)
     while True:
         try:
             event = ts3conn.wait_for_event(timeout=60)
@@ -118,11 +129,10 @@ def start(ts3conn):
             print("Timeout error, consider looking into keepalive log")
         else:
 
-            print(event)
             print(event[0])
 
             # Look at all messages sent in server chat
-            message = event[0]["msg"]
+            message = event[0]["msg"].lower()
             tokenized = message.split(" ")
 
             # Get command (the first string in msg)
@@ -158,11 +168,9 @@ def start(ts3conn):
                 }
                 roll_dice(ts3conn, data)
 
-            elif "!evan" == command:
-                evan(ts3conn)
-
-            # Don't think we need this
-            #event[0]["msg"] = ""
+            elif "!say" == command:
+                person = tokenized[1]
+                say(ts3conn, person)
 
     return
 
