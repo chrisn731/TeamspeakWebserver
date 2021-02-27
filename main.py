@@ -1,5 +1,8 @@
 # C C C C C C C C C C C C
 
+# TODO:
+#   1) Divide and conqueor our files? [main.py, filefinder.py, evan.py, dice.py]
+
 import ts3
 import time
 import sys
@@ -9,9 +12,9 @@ import sqlite3
 import random
 
 SID = 1
+# Must be edited to suit your workstation.
 URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
-
-# rename this file to main plz
+FILE_DIR = "C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\teamspeak3-server_win64\\files\\virtualserver_1\\"
 
 # Maybe we make a file for everyone's classic lines
 evan_lines = []
@@ -23,7 +26,7 @@ def file_finder(ts3conn, item):
     # Create a found files
     Directory = ""
     Found = []
-    for(dirpath, dirnames, filenames) in os.walk("C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\teamspeak3-server_win64\\files\\virtualserver_1\\"):
+    for(dirpath, dirnames, filenames) in os.walk(FILE_DIR):
         for filename in filenames:
             if item in filename:
                 Found.append(filename)
@@ -72,14 +75,14 @@ def roll_dice(ts3conn, data):
     if die_val > 100:
         ts3conn.exec_("gm", msg="That die is too large!")
         return
-    
+
     output = "{user} rolled {dice} for {total}!"
     sum_string = ""
     total = 0
 
     for i in range(num_die):
         r = random.randint(1, die_val)
-        sum_string += str(r) 
+        sum_string += str(r)
         if i != num_die - 1:
             sum_string += " + "
 
@@ -159,7 +162,7 @@ def start(ts3conn):
                 evan(ts3conn)
 
             # Don't think we need this
-            #event[0]["msg"] = "" 
+            #event[0]["msg"] = ""
 
     return
 
