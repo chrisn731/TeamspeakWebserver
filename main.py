@@ -57,9 +57,13 @@ def file_finder(ts3conn, item):
     return tokens[len(tokens) - 1]
 
 def say(ts3conn, person):
-    lines = sayings[person]
-    line = lines[random.randint(0,len(lines)-1)]
-    ts3conn.exec_("gm", msg=line)
+
+    if sayings[person]:
+        lines = sayings[person]
+        line = lines[random.randint(0,len(lines)-1)]
+        ts3conn.exec_("gm", msg=line)
+    else: 
+        ts3conn.exec_("gm", msg="Cannot find sayings for " + person)
 
 def roll_dice(ts3conn, data):
 
@@ -125,8 +129,10 @@ def start(ts3conn):
     while True:
         try:
             event = ts3conn.wait_for_event(timeout=60)
+            ts3conn.send_keepalive()
         except ts3.query.TS3TimeoutError:
             print("Timeout error, consider looking into keepalive log")
+
         else:
 
             print(event[0])
