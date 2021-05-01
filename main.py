@@ -155,12 +155,12 @@ def countdown_get(ts3conn, data):
         ts3conn.exec_("gm", msg=output.format(user=user))
         return
 
-def start_file_finder(ts3conn, data)
+def start_file_finder(ts3conn, data):
     # Find the ID of the channel so we know where to look in the database
     file_to_find = data["file"]
     user = data["user"]
-    channelid = file_finder(ts3conn, tokenized[1])
 
+    channelid = file_finder(ts3conn, tokenized[1])
     # ChannelID > 0, so if < 0 the file wont exit
     if channelid == 0:
         ts3conn.exec_("gm", msg="I'm sorry, {}, but that file does not seem \
