@@ -62,9 +62,8 @@ def file_finder(ts3conn, item):
     return tokens[len(tokens) - 1]
 
 def say(ts3conn, person):
-
-    if sayings[person]:
-        lines = sayings[person]
+    lines = sayings.get(person, 0)
+    if lines:
         line = lines[random.randint(0,len(lines)-1)]
         ts3conn.exec_("gm", msg=line)
     else:
@@ -76,7 +75,8 @@ def roll_dice(ts3conn, data):
     user = data["user"]
 
     numbers = dice.split("d")
-    if numbers != 2:
+    if len(numbers) != 2 or not numbers[0].isnumeric() or not numbers[1].isnumeric():
+        print(numbers)
         send_global_msg(ts3conn, "Roll Usage: !roll {# of dice}d{# of sides on die}")
         return
 
@@ -131,12 +131,13 @@ def database_search(channelid):
     conn.close()
     return channelname
 
-def countdown_get(ts3conn, data):
+
+def countdown(ts3conn, data):
     timer = int(data["time"])
     user = data["user"]
 
     # Handle cases of funny people
-    if timer < 0:
+    if timer <= 0:
         ts3conn.exec_("gm", msg="Fuck you")
         return
 
@@ -150,17 +151,16 @@ def countdown_get(ts3conn, data):
         time.sleep(1)
         timer -= 1
 
-    if timer == 0:
-        output = "{user}'s Timer Is Up"
-        ts3conn.exec_("gm", msg=output.format(user=user))
-        return
+    output = "{user}'s Timer Is Up"
+    ts3conn.exec_("gm", msg=output.format(user=user))
+
 
 def start_file_finder(ts3conn, data):
     # Find the ID of the channel so we know where to look in the database
     file_to_find = data["file"]
     user = data["user"]
-
     channelid = file_finder(ts3conn, tokenized[1])
+
     # ChannelID > 0, so if < 0 the file wont exit
     if channelid == 0:
         ts3conn.exec_("gm", msg="I'm sorry, {}, but that file does not seem \
@@ -186,9 +186,9 @@ def start(ts3conn):
     ts3conn.exec_("servernotifyregister", event="textserver")
     #ts3conn.exec_("servernotifyregister", event="channel", id=7)
     while True:
+        ts3conn.send_keepalive()
         try:
-            event = ts3conn.wait_for_event(timeout=60)
-            ts3conn.send_keepalive()
+            event = ts3conn.wait_for_event(timeout=180)
         except ts3.query.TS3TimeoutError:
             # If we get here, ts3conn.wait_for_event() stalled for the full
             # 60 seconds. No need to do anything.
@@ -210,7 +210,7 @@ def start(ts3conn):
             command = tokenized[0]
 
             # If the first token is the command !find or !get
-            if "!find" == command or "!get" == command: #
+            if "!find" == command or "!get" == command:
                 data = {
                         "file": tokenized[1],
                         "user": event[0]["invokername"]
@@ -233,7 +233,7 @@ def start(ts3conn):
                     "time": tokenized[1],
                     "user": event[0]["invokername"]
                 }
-                countdown_get(ts3conn, data)
+                countdown(ts3conn, data)
 
 if __name__ == "__main__":
     with ts3.query.TS3ServerConnection(URI) as ts3conn:
