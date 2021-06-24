@@ -62,15 +62,41 @@ found:
 	c->last_time_connected = t;
 }
 
+/*
+ * log_diconn - update client node with duration they were connected
+ * @client_name: name of client that disconnected
+ * @t: time that they disconnected
+ *
+ * Notes:
+ * There seems to be a strange problem with very old teamspeak logs. It
+ * seems not all (dis)connections have been logged. This causes the parser to
+ * see things like:
+ * 	(client) : disconnected
+ * 	(client) : disconnected
+ *
+ * 	instead of...
+ * 	(client) : connected
+ * 	(client) : disconnected
+ *
+ * This strange behavior causes c->total_time += time_discon - c->last_conn_time
+ * to accidentally grow very large. The best solution I can work out is just
+ * ignore these values because we can't reliably tell when they actually
+ * connected. Thus, on every disconnection set their last connection time to 0
+ * so if we come across consecutive disconnects the data won't be too crazy.
+ */
 static void log_disconn(const char *client_name, time_t t)
 {
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list) {
-		if (!strcmp(c->name, client_name))
-			break;
+		if (!strcmp(c->name, client_name) && c->last_time_connected) {
+			if (c->last_time_connected) {
+				c->total_time_connected += t - c->last_time_connected;
+				c->last_time_connected = 0;
+			}
+			return;
+		}
 	}
-	c->total_time_connected += t - c->last_time_connected;
 }
 
 static int get_log_type(const char *buf, char *t)
