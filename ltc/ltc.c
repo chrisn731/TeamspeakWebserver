@@ -1,4 +1,5 @@
 #define _XOPEN_SOURCE /* Needed for strptime */
+#define _DEFAULT_SOURCE /* d_type */
 #include <ctype.h>
 #include <dirent.h>
 #include <fcntl.h>
@@ -14,7 +15,6 @@
 
 #define MAX_LINE_SIZE	4096
 #define MAX_CLIENT_NAME	128
-#define READ_ERR	(-2)
 
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
 
@@ -23,6 +23,7 @@ struct client {
 	time_t total_time_connected;
 	char name[MAX_CLIENT_NAME];
 	struct list_node list;
+	int id;
 };
 
 struct log_file {
@@ -44,21 +45,29 @@ static void die(const char *fmt, ...)
 	exit(1);
 }
 
-static void log_conn(const char *client_name, time_t t)
+static void log_conn(const char *client_name, int id, time_t t)
 {
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list) {
-		if (!strcmp(c->name, client_name))
+		if (c->id == id)
 			goto found;
 	}
 	/* Client was not found in the list, add them. */
 	c = calloc(sizeof(*c), 1);
 	if (!c)
 		die("Memory alloc error.");
-	strncpy(c->name, client_name, MAX_CLIENT_NAME - 1);
+	c->id = id;
 	list_add_post(&c->list, &client_list);
 found:
+	if (strcmp(c->name, client_name)) {
+		/*
+		 * If the name of the client is different from what we have
+		 * currently saved, update their name so we always have the
+		 * most recent version of someone's name.
+		 */
+		strncpy(c->name, client_name, MAX_CLIENT_NAME - 1);
+	}
 	c->last_time_connected = t;
 }
 
@@ -83,13 +92,22 @@ found:
  * ignore these values because we can't reliably tell when they actually
  * connected. Thus, on every disconnection set their last connection time to 0
  * so if we come across consecutive disconnects the data won't be too crazy.
+ *
+ * Beware when using names and identifications when searching for clients in
+ * the list. Need to keep an eye out for people logging in with a name that
+ * is not actually related to them.
+ * 	For example,
+ * 		'Bob' has id 1 and 'Alice' has id 2
+ * 		If 'Bob' logs in to the teamspeak with the name 'Alice' then
+ * 		searching by name will cause the algorithm to add Bob's time
+ * 		spent on the server to Alice's time.
  */
-static void log_disconn(const char *client_name, time_t t)
+static void log_disconn(const char *client_name, int id, time_t t)
 {
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list) {
-		if (!strcmp(c->name, client_name) && c->last_time_connected) {
+		if (c->id == id) {
 			if (c->last_time_connected) {
 				c->total_time_connected += t - c->last_time_connected;
 				c->last_time_connected = 0;
@@ -120,9 +138,8 @@ static int get_word(const char *buf, char *t, int buf_len)
 {
 	int nr = 0;
 
-	while (nr < buf_len) {
+	while (nr++ < buf_len) {
 		char c = *buf++;
-		nr++;
 		if (isspace(c))
 			break;
 		*t++ = c;
@@ -134,7 +151,7 @@ static int get_word(const char *buf, char *t, int buf_len)
  * Has a void return value because the name is the last piece of information
  * we need from the buffer.
  */
-static void get_name(const char *buf, char *t, int buf_len)
+static int get_name(const char *buf, char *t, int buf_len)
 {
 	int nr = 0;
 
@@ -144,23 +161,39 @@ static void get_name(const char *buf, char *t, int buf_len)
 	 */
 	if (*buf == '\'')
 		buf++;
-	while (nr < buf_len) {
+	while (nr++ < buf_len) {
 		/* Only allow ascii characters. */
 		if (*buf > 0) {
 			if (*buf == '\'' && buf[1] == '(')
 				break;
 			*t++ = *buf;
-			nr++;
 		}
 		buf++;
 	}
+	return nr;
 }
 
-static int sanitize_line(const char *buf, char *name_buf, char *action)
+static void get_id(const char *buf, char *t, int buf_len)
+{
+	int nr;
+
+	/*
+	 * When we enter here: buf -> '(id:#) so,
+	 * buf + 5 -> # (the number we want)
+	 */
+	buf += 5;
+	for (nr = 0; isdigit(*buf) && nr < buf_len; buf++, nr++)
+		*t++ = *buf;
+
+}
+
+#define ACTION_LEN 20
+static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 {
 	char log_type[10] = {0};
 	char log_event[20] = {0};
 	char first[20] = {0};
+	char id_buf[10] = {0};
 
 	/* Skip past the date shit */
 	while (*buf && *buf != '|')
@@ -181,13 +214,15 @@ static int sanitize_line(const char *buf, char *name_buf, char *action)
 		return -1;
 	while (!isalpha(*buf))
 		buf++;
-	buf += get_word(buf, first, sizeof(first) - 1);
+	buf += get_word(buf, first, sizeof(first));
 	if (strcmp(first, "client"))
 		return -1;
-	buf += get_word(buf, action, 19);
+	buf += get_word(buf, action, ACTION_LEN);
 	if (strcmp(action, "connected") && strcmp(action, "disconnected"))
 		return -1;
-	get_name(buf, name_buf, MAX_CLIENT_NAME);
+	buf += get_name(buf, name_buf, MAX_CLIENT_NAME);
+	get_id(buf, id_buf, sizeof(buf));
+	*id = atoi(id_buf);
 	return 0;
 }
 
@@ -196,7 +231,8 @@ static void process_data(const char *buf)
 	struct tm tm = {0};
 	time_t time;
 	char client_name[MAX_CLIENT_NAME] = {0};
-	char action[20] = {0};
+	char action[ACTION_LEN] = {0};
+	int id;
 
 	/*
 	 * This is basically a long winded process to just parse
@@ -221,13 +257,13 @@ static void process_data(const char *buf)
 	time = mktime(&tm);
 	if (time == (time_t) -1)
 		return;
-	if (sanitize_line(buf, client_name, action))
+	if (parse_line(buf, client_name, action, &id))
 		return;
 
 	if (!strcmp(action, "connected"))
-		log_conn(client_name, time);
+		log_conn(client_name, id, time);
 	else if (!strcmp(action, "disconnected"))
-		log_disconn(client_name, time);
+		log_disconn(client_name, id, time);
 	else
 		fprintf(stderr, "WARN - action come up as: %s\n", action);
 }
@@ -243,13 +279,12 @@ static int parse_file(FILE *fp)
 
 }
 
-static void print_table(void)
+static void print_client_list(void)
 {
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list)
-		printf("NAME: %s | Time connected: %lu\n",
-				c->name, c->total_time_connected);
+		printf("%lu %s\n", c->total_time_connected, c->name);
 }
 
 static void add_to_file_list(const char *full_path, const char *fn)
@@ -286,7 +321,6 @@ static void compile_logs(const char *dir)
 		die("Failed to open directory '%s'", dir);
 
 	while ((de = readdir(dp)) != NULL) {
-		struct stat st;
 		char file_path[1024];
 
 		/*
@@ -298,23 +332,11 @@ static void compile_logs(const char *dir)
 
 		memset(file_path, 0, sizeof(file_path));
 		sprintf(file_path, "%s%s", dir, de->d_name);
-		if (stat(file_path, &st) < 0) {
-			fprintf(stderr, "Error stating '%s'\n", de->d_name);
-			continue;
-		}
-		if (S_ISREG(st.st_mode))
+		if (de->d_type == DT_REG)
 			add_to_file_list(file_path, de->d_name);
 	}
 	if (closedir(dp))
 		die("Error closing %s", dir);
-}
-
-static void print_file_logs(void)
-{
-	struct log_file *f;
-
-	list_for_each_entry(f, &log_list, list)
-		printf("Log name: %s\n", f->name);
 }
 
 static void begin_parsing(void)
@@ -352,7 +374,6 @@ static void free_client_list(void)
 		free(to_free);
 }
 
-
 int main(int argc, char **argv)
 {
 	char *dir_path;
@@ -375,7 +396,7 @@ int main(int argc, char **argv)
 	compile_logs(dir_path);
 	free(dir_path);
 	begin_parsing();
-	print_table();
+	print_client_list();
 	free_logs();
 	free_client_list();
 	return 0;
