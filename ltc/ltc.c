@@ -50,8 +50,15 @@ static void log_conn(const char *client_name, int id, time_t t)
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list) {
-		if (c->id == id)
+		if (c->id == id) {
+			/*
+			 * Clients that recently connect are likely to show up
+			 * again. Move them to the front of the list to reduce
+			 * time iterating down the list in future calls.
+			 */
+			list_move(&c->list, &client_list);
 			goto found;
+		}
 	}
 	/* Client was not found in the list, add them. */
 	c = calloc(sizeof(*c), 1);

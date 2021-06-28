@@ -121,13 +121,13 @@ static inline void list_del_init(struct list_node *l)
  * @curr:	node that will be before the new node
  * @next:	node that will be after the new node
  */
-static inline void __list_add_post(struct list_node *new, struct list_node *curr,
+static inline void __list_add_post(struct list_node *new, struct list_node *prev,
 					struct list_node *next)
 {
-	new->prev = curr;
-	new->next = next;
-	curr->next = new;
 	next->prev = new;
+	new->next = next;
+	new->prev = prev;
+	prev->next = new;
 }
 
 /*
@@ -163,6 +163,28 @@ static inline void __list_add_prev(struct list_node *new, struct list_node *curr
 static inline void list_add_prev(struct list_node *l_new, struct list_node *r)
 {
 	__list_add_prev(l_new, r, r->prev);
+}
+
+static inline void __list_del(struct list_node *prev, struct list_node *next)
+{
+	next->prev = prev;
+	prev->next = next;
+}
+
+static inline void __list_del_entry(struct list_node *entry)
+{
+	__list_del(entry->prev, entry->next);
+}
+
+static inline void list_del(struct list_node *entry)
+{
+	__list_del_entry(entry);
+}
+
+static inline void list_move(struct list_node *l, struct list_node *head)
+{
+	__list_del_entry(l);
+	list_add_post(l, head);
 }
 
 #define list_entry(ptr, type, member)				\
@@ -209,6 +231,5 @@ static inline void list_add_prev(struct list_node *l_new, struct list_node *r)
 		n = list_next_entry(pos, member);			\
 		!list_entry_is_head(pos, head, member);			\
 		pos = n, n = list_next_entry(n, member))
-
 
 #endif /* _DC_LIST_H */
