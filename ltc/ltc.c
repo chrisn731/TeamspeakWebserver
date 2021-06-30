@@ -18,18 +18,53 @@
 
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
 
+/*
+ * struct client - keeps track of important connection information and
+ * different identification methods.
+ */
 struct client {
+	/*
+	 * last_time_connected: Keeps track of when the most recent time the
+	 * client connected to the server.
+	 */
 	time_t last_time_connected;
+
+	/*
+	 * total_time_connected: Keeps track of the total time spent connected
+	 * across multiple disconnects.
+	 */
 	time_t total_time_connected;
-	char name[MAX_CLIENT_NAME];
+
+	/*
+	 * list: List structure to form a list of every client that has ever
+	 * connected.
+	 */
 	struct list_node list;
+
+	/* id: Unique identification number given to every client. */
 	int id;
+
+	/*
+	 * num_conn: The number of concurrent connections the client currently
+	 * has. e.g, if 'Bob' joins under the name 'Bob' and then rejoins the
+	 * same server 'Bob1' will show up in the logs with the same id.
+	 * This leaves us with:
+	 * 	'Bob' (last_time_connected: 30)
+	 * 	'Bob1' (last_time_connected: 65) <- We don't want that time.
+	 * However, we don't want to lost track of the total time connected
+	 * if one of these two connections disconnect. This member solves this
+	 * issue.
+	 */
+	unsigned int num_conn;
+
+	/* name: Most recent name the client has used on the teamspeak. */
+	char name[MAX_CLIENT_NAME];
 };
 
 struct log_file {
 	time_t time;
-	char name[512];
 	struct list_node list;
+	char name[512];
 };
 
 static LIST_NODE(client_list);
@@ -67,15 +102,17 @@ static void log_conn(const char *client_name, int id, time_t t)
 	c->id = id;
 	list_add_post(&c->list, &client_list);
 found:
-	if (strcmp(c->name, client_name)) {
-		/*
-		 * If the name of the client is different from what we have
-		 * currently saved, update their name so we always have the
-		 * most recent version of someone's name.
-		 */
-		strncpy(c->name, client_name, MAX_CLIENT_NAME - 1);
+	if (++c->num_conn == 1) {
+		c->last_time_connected = t;
+		if (strcmp(c->name, client_name)) {
+			/*
+			 * If the name of the client is different from what we
+			 * have currently saved, update their name so we always
+			 * have the most recent version of someone's name.
+			 */
+			strncpy(c->name, client_name, MAX_CLIENT_NAME - 1);
+		}
 	}
-	c->last_time_connected = t;
 }
 
 /*
@@ -109,16 +146,18 @@ found:
  * 		searching by name will cause the algorithm to add Bob's time
  * 		spent on the server to Alice's time.
  */
-static void log_disconn(const char *client_name, int id, time_t t)
+static void log_disconn(const char *client_name, int id, time_t t_disconn)
 {
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list) {
-		if (c->id == id) {
-			if (c->last_time_connected) {
-				c->total_time_connected += t - c->last_time_connected;
+		if (c->id == id && c->num_conn) {
+			if (c->last_time_connected && c->num_conn == 1) {
+				c->total_time_connected +=
+					t_disconn - c->last_time_connected;
 				c->last_time_connected = 0;
 			}
+			c->num_conn--;
 			return;
 		}
 	}
@@ -154,10 +193,6 @@ static int get_word(const char *buf, char *t, int buf_len)
 	return nr;
 }
 
-/*
- * Has a void return value because the name is the last piece of information
- * we need from the buffer.
- */
 static int get_name(const char *buf, char *t, int buf_len)
 {
 	int nr = 0;
@@ -291,7 +326,7 @@ static void print_client_list(void)
 	struct client *c;
 
 	list_for_each_entry(c, &client_list, list)
-		printf("%lu %s\n", c->total_time_connected, c->name);
+		printf("%lu %s %d\n", c->total_time_connected, c->name, c->id);
 }
 
 static void add_to_file_list(const char *full_path, const char *fn)
@@ -346,6 +381,21 @@ static void compile_logs(const char *dir)
 		die("Error closing %s", dir);
 }
 
+/*
+ * Everytime we switch to a new log file, the server had stopped/crashed and
+ * restarted. Thus, no client should have their connection status completely
+ * reset.
+ */
+static void reset_clients(void)
+{
+	struct client *c;
+
+	list_for_each_entry(c, &client_list, list) {
+		c->num_conn = 0;
+		c->last_time_connected = 0;
+	}
+}
+
 static void begin_parsing(void)
 {
 	struct log_file *lf;
@@ -360,6 +410,7 @@ static void begin_parsing(void)
 		}
 		if (parse_file(fp))
 			die("Failed to parse '%s'", lf->name);
+		reset_clients();
 		if (fclose(fp))
 			fprintf(stderr, "Error closing %s\n", lf->name);
 	}
@@ -399,9 +450,9 @@ int main(int argc, char **argv)
 	strncpy(dir_path, argv[1], strlen(argv[1]));
 	if (argv[1][strlen(argv[1]) - 1] != '/')
 		dir_path[strlen(argv[1])] = '/';
-
 	compile_logs(dir_path);
 	free(dir_path);
+
 	begin_parsing();
 	print_client_list();
 	free_logs();
