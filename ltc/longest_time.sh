@@ -10,5 +10,5 @@ test -e ltc ||
 test -e ltc.c && test -e Makefile && make ||
 die "Ensure ltc.c and Makefile exist."
 
-test -d "$1" || die "$1 is does not exist or not a directory."
+test -d "$1" || die "$1 does not exist or is not a directory."
 ./ltc "$1" | sort -n -k1,1
