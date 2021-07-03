@@ -2,6 +2,7 @@
 #define _DEFAULT_SOURCE /* d_type */
 #include <ctype.h>
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -15,6 +16,7 @@
 
 #define MAX_LINE_SIZE	4096
 #define MAX_CLIENT_NAME	128
+#define MAX_FILE_PATH	512
 
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
 
@@ -64,20 +66,34 @@ struct client {
 struct log_file {
 	time_t time;
 	struct list_node list;
-	char name[512];
+	char name[MAX_FILE_PATH];
 };
 
+static time_t time_constraint;
 static LIST_NODE(client_list);
 static LIST_NODE(log_list);
 
 static void die(const char *fmt, ...)
 {
 	va_list argp;
+	int errval = errno;
+
 	va_start(argp, fmt);
-	fprintf(stderr, fmt, argp);
+	vfprintf(stderr, fmt, argp);
 	va_end(argp);
-	fputc('\n', stderr);
+	if (errval)
+		fprintf(stderr, ": %s\n", strerror(errval));
 	exit(1);
+}
+
+static void die_usage(const char *prog_name)
+{
+	fprintf(stdout,
+		"Usage: %s [FLAGS] log_directory\n"
+		"Available flags\n"
+		"  -d		Constraint Date MM-DD-YYYY\n",
+		prog_name);
+	exit(0);
 }
 
 static void log_conn(const char *client_name, int id, time_t t)
@@ -299,6 +315,8 @@ static void process_data(const char *buf)
 	time = mktime(&tm);
 	if (time == (time_t) -1)
 		return;
+	if (time < time_constraint)
+		return;
 	if (parse_line(buf, client_name, action, &id))
 		return;
 
@@ -321,12 +339,29 @@ static int parse_file(FILE *fp)
 
 }
 
+#define SECS_IN_HOUR (3600)
+#define SECS_IN_DAY (SECS_IN_HOUR * 24)
+static void secs_to_dhms(time_t t)
+{
+	unsigned int d, h, m;
+
+	d = t / SECS_IN_DAY;
+	t -= d * SECS_IN_DAY;
+	h = t / SECS_IN_HOUR;
+	t -= h * SECS_IN_HOUR;
+	m = t / 60;
+	t -= m * 60;
+	printf("%ud %uh %um %lus ", d, h, m, t);
+}
+
 static void print_client_list(void)
 {
 	struct client *c;
 
-	list_for_each_entry(c, &client_list, list)
-		printf("%lu %s %d\n", c->total_time_connected, c->name, c->id);
+	list_for_each_entry(c, &client_list, list) {
+		secs_to_dhms(c->total_time_connected);
+		printf("%s\n", c->name);
+	}
 }
 
 static void add_to_file_list(const char *full_path, const char *fn)
@@ -349,7 +384,7 @@ static void add_to_file_list(const char *full_path, const char *fn)
 	if (!new)
 		die("Memory alloc error.");
 	new->time = log_ctime;
-	strcpy(new->name, full_path);
+	strncpy(new->name, full_path, MAX_FILE_PATH);
 	list_add_prev(&new->list, &l->list);
 }
 
@@ -357,13 +392,16 @@ static void compile_logs(const char *dir)
 {
 	DIR *dp;
 	struct dirent *de;
+	size_t dir_len;
 
 	dp = opendir(dir);
 	if (!dp)
 		die("Failed to open directory '%s'", dir);
+	dir_len = strlen(dir);
 
 	while ((de = readdir(dp)) != NULL) {
-		char file_path[1024];
+		char file_path[MAX_FILE_PATH];
+		size_t file_len;
 
 		/*
 		 * Only files ending in _1.log have actual meaningful data to
@@ -371,9 +409,11 @@ static void compile_logs(const char *dir)
 		 */
 		if (!strstr(de->d_name, "_1.log"))
 			continue;
-
-		memset(file_path, 0, sizeof(file_path));
-		sprintf(file_path, "%s%s", dir, de->d_name);
+		file_len = strlen(de->d_name);
+		if (file_len + dir_len > sizeof(file_path))
+			die("The file path %s%s is too large.", dir, de->d_name);
+		strncpy(file_path, dir, dir_len + 1);
+		strncat(file_path, de->d_name, file_len + 1);
 		if (de->d_type == DT_REG)
 			add_to_file_list(file_path, de->d_name);
 	}
@@ -435,21 +475,42 @@ static void free_client_list(void)
 int main(int argc, char **argv)
 {
 	char *dir_path;
+	const char *log_dir, *prog_name = argv[0];
+	unsigned int ld_len;
 
-	if (argc != 2)
-		die("Usage: %s [log directory]", argv[0]);
+	if (argc == 1 || argc > 4)
+		die_usage(prog_name);
 
+	if (!strcmp("-d", argv[1])) {
+		struct tm tm = {0};
+		if (!argv[2]) {
+			fprintf(stderr, "-d requires argument");
+			die_usage(prog_name);
+		}
+		if (!strptime(argv[2], "%m-%d-%Y", &tm)) {
+			fprintf(stderr, "Failed to parse -d argument '%s'\n",
+								argv[2]);
+			die_usage(prog_name);
+		}
+		time_constraint = mktime(&tm);
+		argv += 2;
+	}
+
+	if (!argv[1])
+		die_usage(prog_name);
 	/*
 	 * Need to make sure the directory we want to parse ends in
 	 * a '/' so that when we create path names it doesnt get screwed
 	 * up.
 	 */
-	dir_path = calloc(sizeof(*dir_path), strlen(argv[1]) + 2);
+	log_dir = argv[1];
+	ld_len = strlen(log_dir);
+	dir_path = calloc(sizeof(*dir_path), ld_len + 2);
 	if (!dir_path)
 		die("Memory alloc error.");
-	strncpy(dir_path, argv[1], strlen(argv[1]));
-	if (argv[1][strlen(argv[1]) - 1] != '/')
-		dir_path[strlen(argv[1])] = '/';
+	strncpy(dir_path, log_dir, ld_len);
+	if (log_dir[ld_len - 1] != '/')
+		dir_path[ld_len] = '/';
 	compile_logs(dir_path);
 	free(dir_path);
 
