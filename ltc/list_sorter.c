@@ -39,7 +39,6 @@ static void merge_final(list_cmp_func cmp, struct list_node *head,
 				struct list_node *a, struct list_node *b)
 {
 	struct list_node *tail = head;
-	unsigned int count = 0;
 
 	for (;;) {
 		if (cmp(a, b) <= 0) {
@@ -63,8 +62,6 @@ static void merge_final(list_cmp_func cmp, struct list_node *head,
 
 	tail->next = b;
 	do {
-		if (!++count)
-			cmp(b, b);
 		b->prev = tail;
 		tail = b;
 		b = b->next;

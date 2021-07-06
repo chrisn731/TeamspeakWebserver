@@ -1,7 +1,7 @@
 CC = gcc
 CFLAGS = -O2
 
-all: ltc.c
+all: ltc.c list_sorter.c
 	$(CC) $(CFLAGS) $^ -o ltc
 
 clean:
