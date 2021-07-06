@@ -13,11 +13,19 @@
 #include <time.h>
 #include <unistd.h>
 #include "list.h"
+#include "list_sort.h"
 
 #define MAX_LINE_SIZE	4096
 #define MAX_CLIENT_NAME	128
 #define MAX_FILE_PATH	512
+#define DEFAULT_TABLE_LEN 512
 
+#if __GNUC__
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wstringop-truncation"
+#endif
+
+#define __hot __attribute__((__hot__))
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
 
 /*
@@ -96,7 +104,7 @@ static void die_usage(const char *prog_name)
 	exit(0);
 }
 
-static void log_conn(const char *client_name, int id, time_t t)
+static __hot void log_conn(const char *client_name, int id, time_t t)
 {
 	struct client *c;
 
@@ -162,7 +170,7 @@ found:
  * 		searching by name will cause the algorithm to add Bob's time
  * 		spent on the server to Alice's time.
  */
-static void log_disconn(const char *client_name, int id, time_t t_disconn)
+static __hot void log_disconn(const char *client_name, int id, time_t t_disconn)
 {
 	struct client *c;
 
@@ -254,8 +262,11 @@ static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 	char id_buf[10] = {0};
 
 	/* Skip past the date shit */
+	/*
 	while (*buf && *buf != '|')
 		buf++;
+	*/
+	buf += 26;
 	buf += get_log_type(buf, log_type);
 
 	/*
@@ -413,7 +424,7 @@ static void compile_logs(const char *dir)
 		if (file_len + dir_len > sizeof(file_path))
 			die("The file path %s%s is too large.", dir, de->d_name);
 		strncpy(file_path, dir, dir_len + 1);
-		strncat(file_path, de->d_name, file_len + 1);
+		strncat(file_path, de->d_name, sizeof(file_path) - dir_len - 1);
 		if (de->d_type == DT_REG)
 			add_to_file_list(file_path, de->d_name);
 	}
@@ -472,6 +483,14 @@ static void free_client_list(void)
 		free(to_free);
 }
 
+static int list_cmp(const struct list_node *a, const struct list_node *b)
+{
+	const struct client *c1 = (void *) a - offsetof(struct client, list);
+	const struct client *c2 = (void *) b - offsetof(struct client, list);
+
+	return c1->total_time_connected - c2->total_time_connected;
+}
+
 int main(int argc, char **argv)
 {
 	char *dir_path;
@@ -508,13 +527,14 @@ int main(int argc, char **argv)
 	dir_path = calloc(sizeof(*dir_path), ld_len + 2);
 	if (!dir_path)
 		die("Memory alloc error.");
-	strncpy(dir_path, log_dir, ld_len);
+	strncpy(dir_path, log_dir, ld_len + 1);
 	if (log_dir[ld_len - 1] != '/')
 		dir_path[ld_len] = '/';
 	compile_logs(dir_path);
 	free(dir_path);
 
 	begin_parsing();
+	list_sort(&client_list, &list_cmp);
 	print_client_list();
 	free_logs();
 	free_client_list();
