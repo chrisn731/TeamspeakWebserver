@@ -1,0 +1,94 @@
+<!-- Before you look any further, this is very much scuffed. -->
+<!DOCTYPE html>
+<head>
+	<title>Teamspeak Server Remote</title>
+	<meta charset="utf-8"/>
+	<link rel="icon"
+		href="https://img.rankedboost.com/wp-content/uploads/2014/09/Season_2019_-_Challenger_1.png"
+		type=image/x-icon>
+	<style>
+		*,
+		html {
+			padding: 0;
+			border: 0;
+			font-family: 'Arial';
+		}
+
+		body {
+			height: 100%;
+			position: relative;
+			color: rgb(255, 255, 255);
+			background-color: rgb(68, 79, 83);
+		}
+
+		hr {
+			border: 0;
+			clear: both;
+			display: block;
+			width: 95%;
+			background-color: #FFFFFF;
+			height: 1px;
+		}
+
+		#listOutput {
+			white-space: pre-wrap;
+		}
+	</style>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
+</head>
+
+<body>
+	<center>
+		<h1>CNap's, Buddies, and Friends Webserver</h1>
+		<h2>Make sure to check out Jason's <a href="http://74.88.193.161:8081">website</a></h2>
+	</center>
+	<h2>Who is online?</h2>
+	<!-- DO NOT TOUCH THE BELOW LINE -->
+	<div id="listOutput">{client_list_placeholder}</div>
+	<hr>
+	<h2>Who is online the most?</h2>
+	<h4>Coming soon...</h3>
+	<canvas id="ltcChart" style="width:100%"></canvas>
+	<script>
+		var xyValues = [
+			{x: 0, y: 10},
+			{x: 100, y: 100},
+		]
+
+		new Chart("ltcChart", {
+				type: "scatter",
+				data: {
+					datasets: [{
+						pointRadius: 4,
+						pointBackgroundColor: "rgb(255,0,0)",
+						data: xyValues
+					}]
+				},
+				options: {
+					legends: {display: false},
+					scales: {
+						xAxes: [{
+							tickes: {
+								min: 0,
+								max: 160
+							},
+							gridLines: {
+								display: true,
+								color: "#FC9803"
+							},
+						}],
+						yAxes: [{
+							tickes: {
+								min: 0,
+								max: 160
+							},
+							gridLines: {
+								display: true,
+								color: "#FC9803"
+							},
+						}],
+					},
+				}
+		});
+	</script>
+</body>
