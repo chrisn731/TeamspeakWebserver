@@ -58,8 +58,8 @@
 		<h2>Make sure to check out Jason's <a href="http://74.88.193.161:8081">website</a></h2>
 	</center>
 	<h2>Who is online?</h2>
-		{{ range $channelName, $clientArray := .ClientList }}
 	<table class="ClientTable">
+		{{ range $channelName, $clientArray := .ClientList }}
 		<tr>
 			<td class="ChannelCell">{{ $channelName }}:</td>
 			{{ range $clientName := $clientArray }}
