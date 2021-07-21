@@ -13,15 +13,13 @@ import sqlite3
 from datetime import datetime
 
 
-def print_header():
+def print_datetime():
         now = datetime.now()
         now = now.strftime("%d/%m/%Y %H:%M:%S")
         print("The current time is: {}".format(now))
 
 
-# A pretty client list. Lists name of channels clients are in.
-# Get clients -> lookup channelnames -> Sort -> Print clientlist
-def better_client_list(ts3conn):
+def build_channel_and_client_list(ts3conn):
     client_list = ts3conn.query("clientlist").all()
     channel_list = ts3conn.query("channellist").all()
 
@@ -30,12 +28,9 @@ def better_client_list(ts3conn):
             for client in client_list if client["client_type"] != "1"
     ]
 
-    print("Clients Connected ({}):".format(len(client_list)))
-
     # Return if no clients found.
     if len(client_list) == 0:
-        print("\tNo clients currently connected. :(")
-        return
+        return None
 
     active_channels = []
     for channel in channel_list:
@@ -54,9 +49,15 @@ def better_client_list(ts3conn):
             channel["users"].sort()
 
     # Sort the channels by how many users are in them
-    channel_sorted = sorted(active_channels,
-                            key = lambda c: c["total_clients"],
-                            reverse=True)
+    return sorted(active_channels, key = lambda c: c["total_clients"], reverse=True)
+
+# A pretty client list. Lists name of channels clients are in.
+# Get clients -> lookup channelnames -> Sort -> Print clientlist
+def pretty_client_list(ts3conn):
+    channel_sorted = build_channel_and_client_list(ts3conn)
+    print("Clients Connected ({}):".format(len(channel_sorted)))
+    if channel_sorted is None:
+        print("\tNo clients currently connected. :(")
 
     # Print channels and clients
     for channel in channel_sorted:
@@ -65,6 +66,16 @@ def better_client_list(ts3conn):
             for client in channel["users"]:
                 print("\t\t{}".format(client))
 
+def client_list_for_webserver(ts3conn):
+    channel_client_list = build_channel_and_client_list(ts3conn)
+
+    for channel in channel_client_list:
+        if len(channel["users"]) != 0:
+            print("{}:".format(channel["channel_name"]), end='')
+            for client in channel["users"]:
+                print("{}|".format(client), end='')
+        print("")
+
 # List clients with technical details
 def listclients(ts3conn):
         clients = ts3conn.query("clientlist").all()
@@ -72,7 +83,7 @@ def listclients(ts3conn):
         for client in clients:
             print(client)
 
-URI = "YOUR_TELNET_INFO_HERE"
+URI = "telnet://serveradmin:0e40SwRo@192.168.1.34:10011"
 SID = 1
 
 # Instantiate a connection to the TS3 Query Client, and then parse
@@ -82,11 +93,14 @@ def main():
         ts3conn.exec_("use", sid=SID)
 
         if len(sys.argv) - 1 == 0:
-            print_header()
-            Better_Client_List(ts3conn)
+            print_datetime()
+            pretty_client_list(ts3conn)
         elif sys.argv[1] == "-i":
-            print_header()
+            print_datetime()
             listclients(ts3conn)
+        elif sys.argv[1] == "-g":
+            client_list_for_webserver(ts3conn)
+            pass
         else:
             print("Usage: python clientlist.py [-i/NO ARG]\n" +
             "NO ARG: A human readable client list.\n" +
