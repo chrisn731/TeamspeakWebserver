@@ -19,7 +19,6 @@
 #define MAX_CLIENT_NAME	128
 #define MAX_FILE_PATH	512
 #define DEFAULT_TABLE_LEN 512
-
 #if __GNUC__
 # pragma GCC diagnostic push
 # pragma GCC diagnostic ignored "-Wstringop-truncation"
@@ -80,6 +79,8 @@ struct log_file {
 static time_t time_constraint;
 static LIST_NODE(client_list);
 static LIST_NODE(log_list);
+static unsigned int time_in_seconds;
+static unsigned int tail_count, head_count;
 
 static void die(const char *fmt, ...)
 {
@@ -90,16 +91,18 @@ static void die(const char *fmt, ...)
 	vfprintf(stderr, fmt, argp);
 	va_end(argp);
 	if (errval)
-		fprintf(stderr, ": %s\n", strerror(errval));
+		fprintf(stderr, ": %s", strerror(errval));
+	fputc('\n', stderr);
 	exit(1);
 }
 
 static void die_usage(const char *prog_name)
 {
 	fprintf(stdout,
-		"Usage: %s [FLAGS] log_directory\n"
+		"Usage: %s [-d MM-DD-YYYY] [-s] [-t | -h] log_directory\n"
 		"Available flags\n"
-		"  -d		Constraint Date MM-DD-YYYY\n",
+		"  -d		Constraint Date MM-DD-YYYY\n"
+		"  -s 		Print time connected in seconds\n",
 		prog_name);
 	exit(0);
 }
@@ -134,7 +137,7 @@ found:
 			 * have currently saved, update their name so we always
 			 * have the most recent version of someone's name.
 			 */
-			strncpy(c->name, client_name, MAX_CLIENT_NAME - 1);
+			strncpy(c->name, client_name, MAX_CLIENT_NAME);
 		}
 	}
 }
@@ -261,11 +264,7 @@ static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 	char first[20] = {0};
 	char id_buf[10] = {0};
 
-	/* Skip past the date shit */
-	/*
-	while (*buf && *buf != '|')
-		buf++;
-	*/
+	/* Skip past the date shit which is always 26 characters long. */
 	buf += 26;
 	buf += get_log_type(buf, log_type);
 
@@ -344,34 +343,54 @@ static int parse_file(FILE *fp)
 {
 	char buf[MAX_LINE_SIZE];
 
-	while (fgets(buf, MAX_LINE_SIZE, fp))
+	while (fgets(buf, MAX_LINE_SIZE, fp)) {
+		if (!memchr(buf, '\n', MAX_LINE_SIZE))
+			die("Line that starts with %.*s is too long to parse",
+					MAX_LINE_SIZE - 1, buf);
 		process_data(buf);
+	}
 	return feof(fp) ? 0 : 1;
 
 }
 
 #define SECS_IN_HOUR (3600)
 #define SECS_IN_DAY (SECS_IN_HOUR * 24)
-static void secs_to_dhms(time_t t)
+static void print_client_time(const struct client *c)
 {
-	unsigned int d, h, m;
+	unsigned long days, hrs, mins, secs = c->total_time_connected;
 
-	d = t / SECS_IN_DAY;
-	t -= d * SECS_IN_DAY;
-	h = t / SECS_IN_HOUR;
-	t -= h * SECS_IN_HOUR;
-	m = t / 60;
-	t -= m * 60;
-	printf("%ud %uh %um %lus ", d, h, m, t);
+	if (time_in_seconds) {
+		printf("%lu %s\n", secs, c->name);
+	} else {
+		days = secs / SECS_IN_DAY;
+		secs -= days * SECS_IN_DAY;
+		hrs = secs / SECS_IN_HOUR;
+		secs -= hrs * SECS_IN_HOUR;
+		mins = secs / 60;
+		secs -= mins * 60;
+		printf("%lud %luh %lum %lus %s\n", days, hrs, mins, secs, c->name);
+	}
 }
 
 static void print_client_list(void)
 {
 	struct client *c;
 
-	list_for_each_entry(c, &client_list, list) {
-		secs_to_dhms(c->total_time_connected);
-		printf("%s\n", c->name);
+	if (tail_count) {
+		list_for_each_entry(c, &client_list, list) {
+			print_client_time(c);
+			if (!--tail_count)
+				break;
+		}
+	} else if (head_count) {
+		list_for_each_entry_reverse(c, &client_list, list) {
+			print_client_time(c);
+			if (!--head_count)
+				break;
+		}
+	} else {
+		list_for_each_entry(c, &client_list, list)
+			print_client_time(c);
 	}
 }
 
@@ -447,7 +466,7 @@ static void reset_clients(void)
 	}
 }
 
-static void begin_parsing(void)
+static void parse_file_list(void)
 {
 	struct log_file *lf;
 
@@ -459,7 +478,7 @@ static void begin_parsing(void)
 			fprintf(stderr, "Error fopen on %s\n", lf->name);
 			continue;
 		}
-		if (parse_file(fp))
+		if (parse_file(fp) || !feof(fp))
 			die("Failed to parse '%s'", lf->name);
 		reset_clients();
 		if (fclose(fp))
@@ -493,36 +512,54 @@ static int list_cmp(const struct list_node *a, const struct list_node *b)
 
 int main(int argc, char **argv)
 {
+	struct tm tm;
+	unsigned int ld_len;
+	int opt;
 	char *dir_path;
 	const char *log_dir, *prog_name = argv[0];
-	unsigned int ld_len;
 
-	if (argc == 1 || argc > 4)
-		die_usage(prog_name);
-
-	if (!strcmp("-d", argv[1])) {
-		struct tm tm = {0};
-		if (!argv[2]) {
-			fprintf(stderr, "-d requires argument");
+	while ((opt = getopt(argc, argv, "d:h:st:")) != -1) {
+		switch (opt) {
+		case 'd':
+			memset(&tm, 0, sizeof(tm));
+			if (!strptime(optarg, "%m-%d-%Y", &tm)) {
+				fprintf(stderr, "Failed to parse -d argument '%s'\n",
+									optarg);
+				die_usage(prog_name);
+			}
+			time_constraint = mktime(&tm);
+			break;
+		case 's':
+			time_in_seconds = 1;
+			break;
+		case 'h':
+			if (tail_count)
+				die_usage(prog_name);
+			head_count = atoi(optarg);
+			break;
+		case 't':
+			if (head_count)
+				die_usage(prog_name);
+			tail_count = atoi(optarg);
+			break;
+		case '?':
+		default:
 			die_usage(prog_name);
+			break;
 		}
-		if (!strptime(argv[2], "%m-%d-%Y", &tm)) {
-			fprintf(stderr, "Failed to parse -d argument '%s'\n",
-								argv[2]);
-			die_usage(prog_name);
-		}
-		time_constraint = mktime(&tm);
-		argv += 2;
 	}
+	argc -= optind;
+	argv += optind;
 
-	if (!argv[1])
+	if (!*argv)
 		die_usage(prog_name);
+
 	/*
 	 * Need to make sure the directory we want to parse ends in
 	 * a '/' so that when we create path names it doesnt get screwed
 	 * up.
 	 */
-	log_dir = argv[1];
+	log_dir = *argv;
 	ld_len = strlen(log_dir);
 	dir_path = calloc(sizeof(*dir_path), ld_len + 2);
 	if (!dir_path)
@@ -533,7 +570,7 @@ int main(int argc, char **argv)
 	compile_logs(dir_path);
 	free(dir_path);
 
-	begin_parsing();
+	parse_file_list();
 	list_sort(&client_list, &list_cmp);
 	print_client_list();
 	free_logs();

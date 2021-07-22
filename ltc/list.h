@@ -187,14 +187,42 @@ static inline void list_move(struct list_node *l, struct list_node *head)
 	list_add_post(l, head);
 }
 
+static inline void list_replace(struct list_node *old, struct list_node *new)
+{
+	new->next = old->next;
+	new->next->prev = new;
+	new->prev = old->prev;
+	new->prev->next = new;
+}
+
+static inline void list_swap(struct list_node *entry1, struct list_node *entry2)
+{
+	struct list_node *p = entry2->prev;
+
+	list_del(entry2);
+	list_replace(entry1, entry2);
+	if (p == entry1)
+		p = entry2;
+	list_add_post(entry1, p);
+}
+
 #define list_entry(ptr, type, member)				\
 	((type *) ((void *) (ptr) - offsetof(type, member)))	\
+
+#define list_first_entry(pos, type, member) \
+	list_entry((pos)->next, type, member)
+
+#define list_last_entry(ptr, type, member)	\
+	list_entry((ptr)->prev, type, member)
 
 #define list_entry_is_head(pos, head, member) \
 	(&pos->member == (head))
 
 #define list_next_entry(pos, member) \
 	list_entry((pos)->member.next, typeof(*(pos)), member)
+
+#define list_prev_entry(pos, member)	\
+	list_entry((pos)->member.prev, typeof(*(pos)), member)
 
 #define list_for_each(cursor, head) \
 	for ((cursor) = (head)->next; (cursor) != (head); (cursor) = (cursor)->next)
@@ -209,18 +237,15 @@ static inline void list_move(struct list_node *l, struct list_node *head)
 	for (cursor = (head)->next, l = cursor->next; cursor != (head); \
 			cursor = l, n = cursor->next)
 
-#define list_first_entry(pos, type, member) \
-	list_entry((pos)->next, type, member)
-
 #define list_for_each_entry(pos, head, member) \
 	for (pos = list_first_entry(head, typeof(*pos), member);	\
 		!list_entry_is_head(pos, head, member);			\
 		pos = list_next_entry(pos, member))
 
-#define list_for_each_entry_continue(pos, head, member) \
-	for (pos = list_entry(pos, member);		\
-		!list_entry_is_head(pos, head, member);	\
-		pos = list_next_entry(pos, member))
+#define list_for_each_entry_reverse(pos, head, member)		\
+	for (pos = list_last_entry(head, typeof(*pos), member);	\
+		!list_entry_is_head(pos, head, member);		\
+		pos = list_prev_entry(pos, member))
 
 #define list_for_each_entry_from(from, head, member)	\
 	for (; !list_entry_is_head(from, head, member);	\
@@ -231,5 +256,10 @@ static inline void list_move(struct list_node *l, struct list_node *head)
 		n = list_next_entry(pos, member);			\
 		!list_entry_is_head(pos, head, member);			\
 		pos = n, n = list_next_entry(n, member))
+
+#define list_for_each_entry_continue(pos, head, member)		\
+	for (pos = list_next_entry(pos, member);		\
+		!list_entry_is_head(pos, head, member);		\
+		pos = list_next_entry(pos, member))
 
 #endif /* _DC_LIST_H */
