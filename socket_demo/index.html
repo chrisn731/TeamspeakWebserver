@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Websocket Demo for Chris</title>
+</head>
+<body>
+    <h1>👩‍👩‍👧‍👧👩‍👩‍👦‍👦👩‍👩‍👧‍👦👩‍👩‍👧👨‍👨‍👧‍👧👨‍👨‍👦‍👦👨‍👧‍👧👩🏻‍🤝‍👩🏻</h1>
+
+    <button id="btn-test-msg">Send message</button>
+
+    <script>
+        let socket = new WebSocket("ws://" + document.location.host + "/ws");
+
+        const btnTestMsg = document.getElementById("btn-test-msg");
+        btnTestMsg.addEventListener("click", () => {
+            let json = JSON.stringify({
+                username: "Chris",
+                message: "Touch grass"
+            })
+            socket.send(json)
+        }) 
+
+        socket.onmessage = event => {
+            // event.data contains the received message struct, which is a string
+            // that needs to be parsed
+            let msg = JSON.parse(event.data)
+            console.log(msg.username + " " + msg.message)
+        }
+
+        socket.onopen = () => {
+            console.log("Successfully Connected");
+        };
+        
+        socket.onclose = event => {
+            console.log("Socket Closed Connection: ", event);
+        };
+
+
+        socket.onerror = error => {
+            
+        };
+
+    </script>
+
+</body>
+</html>
