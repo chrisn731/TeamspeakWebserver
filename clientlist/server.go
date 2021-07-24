@@ -11,14 +11,40 @@ import (
 	"regexp"
 	"strings"
 	"strconv"
+	"time"
+	"github.com/gorilla/websocket"
 )
 
 
 var validpath = regexp.MustCompile("^/$")
 
+var clients = make(map[*websocket.Conn]bool)
+var broadcast = make(chan Message)
+var mockData = make(chan Message)
+
+const (
+	socketTimeoutSeconds = 5
+	socketTimeout = socketTimeoutSeconds * 1000
+)
+
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool {
+		return true
+	},
+}
+
 type clientTimeEntry struct {
 	TotalTime uint64
 	ClientName string
+}
+
+type Message struct {
+	Data []ChannelClientPair `json:"data"`
+}
+
+type ChannelClientPair struct {
+	ChannelName string
+	Clients []string
 }
 
 /*
@@ -108,15 +134,90 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 		http.ServeFile(w, r, "./404.html")
 		return
 	}
-	p := clientListPage{ClientList: buildChannelClientMap(), ClientTimeEntries: buildClientTime()}
+	p := clientListPage{
+		ClientList: buildChannelClientMap(),
+		ClientTimeEntries: buildClientTime(),
+	}
 	t := template.Must(template.ParseFiles("clientlist.html"))
 	if err := t.Execute(w, p); err != nil {
 		panic(err)
 	}
 }
 
+func handleConnections(w http.ResponseWriter, r *http.Request) {
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer conn.Close()
+
+	clients[conn] = true
+
+	for {
+		var msg Message
+
+		err := conn.ReadJSON(&msg)
+		if err != nil {
+			log.Printf("error: %v", err)
+			delete(clients, conn)
+			break
+		}
+		broadcast <-msg
+	}
+}
+
+
+func fillData() {
+	for {
+		var shit Message
+		for k, v := range buildChannelClientMap() {
+			pair := ChannelClientPair{
+					ChannelName: k,
+					Clients: v,
+				}
+			shit.Data = append(shit.Data, pair)
+		}
+		mockData <- shit
+		time.Sleep(socketTimeout)
+	}
+}
+
+func handleMessages() {
+	for {
+		select {
+		// Grab the next message from the broadcast channel
+		case msg := <-broadcast:
+			// Send it out to every client that is currently connected
+			for client := range clients {
+				err := client.WriteJSON(msg)
+				// if writing the messaged gave an error, close the connection i guess pog
+				if err != nil {
+					log.Printf("error: %v", err)
+					client.Close()
+					delete(clients, client)
+				}
+			}
+
+		case msg := <-mockData:
+			for client := range clients {
+				err := client.WriteJSON(msg)
+				if err != nil {
+					log.Printf("error: %v", err)
+					client.Close()
+					delete(clients, client)
+				}
+			}
+
+		}
+	}
+}
+
 func main() {
 	http.HandleFunc("/", indexHandler)
+	http.HandleFunc("/ws", handleConnections)
+
+	go handleMessages()
+	go fillData()
 	if err := http.ListenAndServe(":8081", nil); err != nil {
 		log.Fatal(err)
 	}

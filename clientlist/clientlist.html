@@ -31,12 +31,13 @@
 			height: 1px;
 		}
 
-		.ClientTable {
+		#clienttable {
 			border: 1px solid black;
 			border-collapse: collapse;
 		}
 
 		.ChannelCell {
+			border: 1px solid black;
 			padding: 5px;
 		}
 
@@ -44,12 +45,9 @@
 			border: 1px solid black;
 			padding: 5px;
 		}
-
-		#listOutput {
-			white-space: pre-wrap;
-		}
 	</style>
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
+	<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js" type="text/javascript"></script>
 </head>
 
 <body>
@@ -58,16 +56,56 @@
 		<h2>Make sure to check out Jason's <a href="http://74.88.193.161:8081">website</a></h2>
 	</center>
 	<h2>Who is online?</h2>
-	<table class="ClientTable">
-		{{ range $channelName, $clientArray := .ClientList }}
-		<tr>
-			<td class="ChannelCell">{{ $channelName }}:</td>
-			{{ range $clientName := $clientArray }}
-				<td class="ClientCell">{{ $clientName }}</td>
-			{{ end }}
-		</tr>
-		{{ end }}
-	</table>
+	<table id="clienttable"></table>
+	<script>
+		$(document).ready(function() {
+		let socket = new WebSocket("ws://" + document.location.host + "/ws");
+		let debug = false
+
+		socket.onmessage = event => {
+			let msg = JSON.parse(event.data)
+			if (debug) {
+				for (var chans = 0; chans < msg.data.length; chans++) {
+					var currChan = msg.data[chans].Clients
+					console.log(msg.data[chans].ChannelName)
+					for (var clients = 0; clients < currChan.length; clients++) {
+						console.log(currChan[clients])
+					}
+				}
+			}
+			updateTable(msg.data)
+		}
+
+		socket.onopen = () => {
+			console.log("Successfully Connected");
+		};
+
+		socket.onclose = event => {
+			console.log("Socket Closed Connection: ", event);
+		};
+
+		socket.onerror = error => { };
+
+		function updateTable(clientListData) {
+			var rows = '<tr><th>Channels</th><th>Clients</th></tr>';
+			$.each(clientListData, function(index, item) {
+				var row = '<tr class="ChannelCell">';
+				row += '<td class="ChannelCell">' + item['ChannelName'] + '</td>';
+				/* Start inserting clients */
+				row += '<td>';
+				for (var i = 0; i < item['Clients'].length; i++) {
+					row += item['Clients'][i] + ' ';
+				}
+				row += '</td>'
+				if (debug)
+					console.log(row)
+				rows += row + '</tr>'
+			});
+			$(clienttable).html(rows)
+		}
+		});
+
+	</script>
 	<hr>
 	<h2>Who is online the most?</h2>
 	<h4>Coming soon...</h3>
