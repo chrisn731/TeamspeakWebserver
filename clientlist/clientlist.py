@@ -14,11 +14,21 @@ from datetime import datetime
 
 
 def print_datetime():
-        now = datetime.now()
-        now = now.strftime("%d/%m/%Y %H:%M:%S")
-        print("The current time is: {}".format(now))
+    now = datetime.now()
+    now = now.strftime("%d/%m/%Y %H:%M:%S")
+    print("The current time is: {}".format(now))
 
 
+"""
+build_channel_and_client_list - return array of dictionaries that map channels to clients
+
+Builds and returns an array of dictionaries based on currently connected clients.
+Each dictionary within the array contains the fields:
+    "cid" - Channel ID
+    "channel_name" - Name of the channel
+    "users" - array of client nicknames
+    "total_clients" - number of clients connected to the channel
+"""
 def build_channel_and_client_list(ts3conn):
     client_list = ts3conn.query("clientlist").all()
     channel_list = ts3conn.query("channellist").all()
@@ -28,7 +38,6 @@ def build_channel_and_client_list(ts3conn):
             for client in client_list if client["client_type"] != "1"
     ]
 
-    # Return if no clients found.
     if len(client_list) == 0:
         return None
 
@@ -51,6 +60,7 @@ def build_channel_and_client_list(ts3conn):
     # Sort the channels by how many users are in them
     return sorted(active_channels, key = lambda c: c["total_clients"], reverse=True)
 
+
 # A pretty client list. Lists name of channels clients are in.
 # Get clients -> lookup channelnames -> Sort -> Print clientlist
 def pretty_client_list(ts3conn):
@@ -66,18 +76,28 @@ def pretty_client_list(ts3conn):
             for client in channel["users"]:
                 print("\t\t{}".format(client))
 
+"""
+client_list_for_webserver - Function used by Go webserver.
+
+Prints a newline seperated list of channels with their contained clients
+Each name is tab ('\t') seperated to make parsing of the strings easier
+within Go code. This decision was also made because Teamspeak client names
+allow for any and all characters besides control characters. ('\n', '\t', etc).
+Thus new lines are used to seperate different channels, and tab characters are
+used to split up clients within the channel.
+"""
 def client_list_for_webserver(ts3conn):
     channel_client_list = build_channel_and_client_list(ts3conn)
-
     for channel in channel_client_list:
         if len(channel["users"]) != 0:
-            print("{}:".format(channel["channel_name"]), end='')
+            print("{}\t".format(channel["channel_name"]), end='')
             for client in channel["users"]:
-                print("{}|".format(client), end='')
-        print("")
+                print("{}\t".format(client), end='')
+            print("")
+
 
 # List clients with technical details
-def listclients(ts3conn):
+def list_clients(ts3conn):
         clients = ts3conn.query("clientlist").all()
         print("Clients Connected ({}):".format(len(clients)))
         for client in clients:
@@ -97,7 +117,7 @@ def main():
             pretty_client_list(ts3conn)
         elif sys.argv[1] == "-i":
             print_datetime()
-            listclients(ts3conn)
+            list_clients(ts3conn)
         elif sys.argv[1] == "-g":
             client_list_for_webserver(ts3conn)
             pass

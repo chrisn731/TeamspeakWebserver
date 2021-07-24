@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"fmt"
+	_ "fmt"
 	"html/template"
 	"log"
 	"net/http"
@@ -24,7 +24,7 @@ var mockData = make(chan Message)
 
 const (
 	socketTimeoutSeconds = 5
-	socketTimeout = socketTimeoutSeconds * 1000
+	socketTimeout = socketTimeoutSeconds * time.Second
 )
 
 var upgrader = websocket.Upgrader{
@@ -73,6 +73,9 @@ func fetchClientList() string {
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
+	if cmd.ProcessState.ExitCode() == -1 {
+		log.Fatal("clientlist.py failed.")
+	}
 	return string(stdout.Bytes())
 }
 
@@ -80,20 +83,17 @@ func buildChannelClientMap() map[string][]string {
 	channelClientMap := make(map[string][]string)
 	clientList := fetchClientList()
 
+	// Different channels are newline seperated
 	channelClientLines := strings.Split(clientList, "\n")
 	for _, line := range channelClientLines {
 		if len(line) <= 0 {
 			continue
 		}
 
-		channelClientSplit := strings.Split(line, ":")
-		if len(channelClientSplit) != 2 && len(channelClientSplit) != 0 {
-			fmt.Println("ayo? ", channelClientSplit)
-			os.Exit(1)
-		}
-
+		// Different clients are tab character seperated
+		channelClientSplit := strings.Split(line, "\t")
 		channelName := channelClientSplit[0]
-		clientSplit := strings.Split(channelClientSplit[1], "|")
+		clientSplit := channelClientSplit[1:]
 
 		var clients []string = nil
 		for _, clientName := range clientSplit {
@@ -152,7 +152,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	clients[conn] = true
-
 	for {
 		var msg Message
 
