@@ -12,6 +12,7 @@ import (
 	"strings"
 	"strconv"
 	"time"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 )
 
@@ -19,7 +20,7 @@ import (
 var validpath = regexp.MustCompile("^/$")
 
 var clients = make(map[*websocket.Conn]bool)
-var broadcast = make(chan Message)
+var broadcast = make(chan ClientChatMessage)
 var mockData = make(chan Message)
 
 const (
@@ -31,6 +32,18 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+/* struct for receiving data */
+type ClientPackage struct {
+	Header string `json:"header"`
+	Payload string `json:"payload"`
+}
+
+type ClientChatMessage struct {
+	IP string 
+	Message string
+	Time string
 }
 
 type clientTimeEntry struct {
@@ -151,16 +164,33 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close()
 
 	clients[conn] = true
-	for {
-		var msg Message
 
-		err := conn.ReadJSON(&msg)
+	for {
+		var p ClientPackage
+
+		err := conn.ReadJSON(&p)
+
+		switch p.Header {
+		case "chatmessage":
+
+			var message ClientChatMessage
+
+			json.Unmarshal([]byte(p.Payload), &message)
+
+			/* Do things with the message here
+			 *	
+			 * It's only sending the message JSON back to the
+			 * user for now.
+			 */
+			broadcast <- message
+		}
+
 		if err != nil {
 			log.Printf("error: %v", err)
 			delete(clients, conn)
 			break
 		}
-		broadcast <-msg
+
 	}
 }
 
