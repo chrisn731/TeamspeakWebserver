@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<head>
+	<title>Teamspeak Server Remote</title>
+	<meta charset="utf-8"/>
+	<link rel="icon"href="https://img.rankedboost.com/wp-content/uploads/2014/09/Season_2019_-_Challenger_1.png" type=image/x-icon>
+	<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
+	<link rel="stylesheet" type="text/css" href="/static/style.css">
+	<script defer src="/static/app.js"></script>
+</head>
+
+<body>
+	<div id="container">
+		<div id="header">
+			<div id="text">
+				<div class="title-1">CNap's, Buddies, and Friends Webserver</div>
+
+				<p>Make sure to check out Jason's <a href="http://74.88.193.161:8081">website</a></p>
+
+				<div id="motd">Put a randomly returned message here for fun</div>
+			</div>
+		</div>
+
+		<div id="server-interface">
+			<div id="list-container">
+				<h2>Who is online?</h2>
+
+				<div id="channels"></div>
+			</div>
+			<div id="chat-container">
+				<h2>Chat with the boys</h2>
+				<textarea id="chat-log" readonly="readonly" ></textarea>
+				<br>
+				<div>
+					<input id="chat-input" type="text" placeholder="Type message...">
+					<button id="chat-send">Send</button>
+				</div>
+			</div>
+
+		</div>
+		<hr>
+		<h2>Who is online the most?</h2>
+		<h4>Coming soon...</h3>
+	</div>
+	<canvas id="ltcChart" style="width:100%"></canvas>
+	<script>
+		new Chart("ltcChart", {
+			type: "pie",
+			data: {
+				labels: [
+					{{ range $clientEntry := .ClientTimeEntries }}
+						'{{ $clientEntry.ClientName }}',
+					{{ end }}
+				],
+				datasets: [{
+					data: [
+					{{ range $clientEntry := .ClientTimeEntries }}
+						'{{ $clientEntry.TotalTime }}',
+					{{ end }}
+
+					],
+					backgroundColor: ["red", "blue", "green", "yellow", "purple"],
+					hoverOffset: 4,
+				}]
+			},
+		});
+	</script>
+</body>

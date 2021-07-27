@@ -1,0 +1,80 @@
+const ChatLog = document.getElementById("chat-log")
+const ChatInput = document.getElementById("chat-input")
+const ChannelList = document.getElementById("channels")
+const ChatSend = document.getElementById("chat-send")
+
+/* Use this to change the pulsing message (Motd.innerText = [message]) */
+const Motd = document.getElementById("motd")
+
+let socket = new WebSocket("ws://" + document.location.host + "/ws");
+let debug = false
+
+ChatSend.addEventListener("click", () => {
+	let text = ChatInput.value
+
+	let message = {
+		ip: "blah.blah.blah", // Todo: get IP
+		message: text,
+		time: "69:69 PM" // Todo: get time - I'm lazy af
+	}
+
+	let json = JSON.stringify(message)
+
+	let data = {
+		header: "chatmessage",
+		payload: json
+	}
+
+	if (debug) {
+		console.log(json)
+		console.log(data)
+	}
+
+	socket.send(JSON.stringify(data))
+	ChatLog.append(`${text}\n`) // probably comment this out once server communication is set up
+	ChatLog.scrollTop = ChatLog.scrollHeight
+	ChatInput.value = ""
+})
+
+socket.onmessage = event => {
+	let msg = JSON.parse(event.data)
+	if (debug) {
+		for (var chans = 0; chans < msg.data.length; chans++) {
+			var currChan = msg.data[chans].Clients
+			console.log(msg.data[chans].ChannelName)
+			for (var clients = 0; clients < currChan.length; clients++) {
+				console.log(currChan[clients])
+			}
+		}
+	}
+	updateTable(msg.data)
+}
+
+socket.onopen = () => {
+	console.log("Successfully Connected");
+};
+
+socket.onclose = event => {
+	console.log("Socket Closed Connection: ", event);
+};
+
+socket.onerror = error => { };
+
+function updateTable(clientListData) {
+	let html = "";
+
+	if (clientListData === undefined)
+		return
+
+	for(let item of clientListData) {
+		html += `<ul class="list-channels">${item.ChannelName}`;
+		/* Start inserting clients */
+		html += "<li><ul class='list-clients'>";
+		for (let client of item.Clients) {
+			html += `<li>${client}</li>`
+		}
+		html += '</ul></ul>'
+	}
+
+	ChannelList.innerHTML = html
+}

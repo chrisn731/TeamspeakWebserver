@@ -19,10 +19,6 @@
 #define MAX_CLIENT_NAME	128
 #define MAX_FILE_PATH	512
 #define DEFAULT_TABLE_LEN 512
-#if __GNUC__
-# pragma GCC diagnostic push
-# pragma GCC diagnostic ignored "-Wstringop-truncation"
-#endif
 
 #define __hot __attribute__((__hot__))
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
@@ -357,19 +353,22 @@ static int parse_file(FILE *fp)
 #define SECS_IN_DAY (SECS_IN_HOUR * 24)
 static void print_client_time(const struct client *c)
 {
-	unsigned long days, hrs, mins, secs = c->total_time_connected;
+	unsigned long secs = c->total_time_connected;
 
 	if (time_in_seconds) {
-		printf("%lu %s\n", secs, c->name);
+		printf("%lu", secs);
 	} else {
+		unsigned long days, hrs, mins;
+
 		days = secs / SECS_IN_DAY;
 		secs -= days * SECS_IN_DAY;
 		hrs = secs / SECS_IN_HOUR;
 		secs -= hrs * SECS_IN_HOUR;
 		mins = secs / 60;
 		secs -= mins * 60;
-		printf("%lud %luh %lum %lus %s\n", days, hrs, mins, secs, c->name);
+		printf("%lud %luh %lum %lus", days, hrs, mins, secs);
 	}
+	printf("\t%s\n", c->name);
 }
 
 static void print_client_list(void)
@@ -564,7 +563,7 @@ int main(int argc, char **argv)
 	dir_path = calloc(sizeof(*dir_path), ld_len + 2);
 	if (!dir_path)
 		die("Memory alloc error.");
-	strncpy(dir_path, log_dir, ld_len + 1);
+	memcpy(dir_path, log_dir, ld_len + 1);
 	if (log_dir[ld_len - 1] != '/')
 		dir_path[ld_len] = '/';
 	compile_logs(dir_path);

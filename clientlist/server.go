@@ -41,9 +41,9 @@ type ClientPackage struct {
 }
 
 type ClientChatMessage struct {
-	IP string 
-	Message string
-	Time string
+	IP string `json:"ip"`
+	Message string `json:"message"`
+	Time string `json:"time"`
 }
 
 type clientTimeEntry struct {
@@ -142,17 +142,23 @@ func buildClientTime() []clientTimeEntry {
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
-	if m := validpath.FindStringSubmatch(r.URL.Path); m == nil {
-		http.ServeFile(w, r, "./404.html")
-		return
-	}
-	p := clientListPage{
-		ClientList: buildChannelClientMap(),
-		ClientTimeEntries: buildClientTime(),
-	}
-	t := template.Must(template.ParseFiles("clientlist.html"))
-	if err := t.Execute(w, p); err != nil {
-		panic(err)
+	req := "." + r.URL.Path
+	if req == "./" {
+		p := clientListPage{
+			ClientList: buildChannelClientMap(),
+			ClientTimeEntries: buildClientTime(),
+		}
+		t := template.Must(template.ParseFiles("./static/index.html"))
+		if err := t.Execute(w, p); err != nil {
+			panic(err)
+		}
+	} else  {
+		req = "." + r.URL.Path
+		info, err := os.Stat(req)
+		if err != nil && os.IsNotExist(err) || info.IsDir() {
+			req = "./static/404.html"
+		}
+		http.ServeFile(w, r, req)
 	}
 }
 
@@ -169,20 +175,28 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		var p ClientPackage
 
 		err := conn.ReadJSON(&p)
+		if err != nil {
+			log.Printf("Error reading ClientPackage %v", err)
+			if e, ok := err.(*json.SyntaxError); ok {
+				log.Printf("Syntax error at byte offset %d", e.Offset)
+			}
+			return
+		}
 
 		switch p.Header {
 		case "chatmessage":
-
 			var message ClientChatMessage
 
-			json.Unmarshal([]byte(p.Payload), &message)
-
-			/* Do things with the message here
-			 *	
-			 * It's only sending the message JSON back to the
-			 * user for now.
-			 */
-			broadcast <- message
+			err := json.Unmarshal([]byte(p.Payload), &message)
+			if err != nil {
+				log.Printf("Error unmarshaling payload: %v", err)
+				continue
+			}
+			log.Printf(message.Message)
+			/* Do things with the message here */
+			break
+		default:
+			continue
 		}
 
 		if err != nil {
