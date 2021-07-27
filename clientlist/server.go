@@ -153,7 +153,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 			panic(err)
 		}
 	} else  {
-		req = "." + r.URL.Path
+		req = "./static/" + r.URL.Path
 		info, err := os.Stat(req)
 		if err != nil && os.IsNotExist(err) || info.IsDir() {
 			req = "./static/404.html"
