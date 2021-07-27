@@ -82,20 +82,19 @@ func fetchClientList() string {
 func buildChannelClientMap() map[string][]string {
 	channelClientMap := make(map[string][]string)
 	clientList := fetchClientList()
+	f := func(c rune) bool {
+		return c == '\n'
+	}
 
 	// Different channels are newline seperated
-	channelClientLines := strings.Split(clientList, "\n")
+	channelClientLines := strings.FieldsFunc(clientList, f)
 	for _, line := range channelClientLines {
-		if len(line) <= 0 {
-			continue
-		}
-
+		var clients []string = nil
 		// Different clients are tab character seperated
 		channelClientSplit := strings.Split(line, "\t")
 		channelName := channelClientSplit[0]
 		clientSplit := channelClientSplit[1:]
 
-		var clients []string = nil
 		for _, clientName := range clientSplit {
 			/*
 			 * When we are splitting strings, make sure we
@@ -115,7 +114,7 @@ func buildClientTime() []clientTimeEntry {
 	times := strings.Split(fetchClientTime(), "\n")
 
 	for _, line := range times {
-		timeNameSplit := strings.Split(line, " ")
+		timeNameSplit := strings.Split(line, "\t")
 		if len(line) <= 0 {
 			continue
 		}
