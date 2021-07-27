@@ -65,7 +65,6 @@ type ChannelClientPair struct {
  * Eventually more things will be added, I think.
  */
 type clientListPage struct {
-	ClientList map[string][]string
 	ClientTimeEntries []clientTimeEntry
 }
 
@@ -145,7 +144,6 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	req := "." + r.URL.Path
 	if req == "./" {
 		p := clientListPage{
-			ClientList: buildChannelClientMap(),
 			ClientTimeEntries: buildClientTime(),
 		}
 		t := template.Must(template.ParseFiles("./static/index.html"))

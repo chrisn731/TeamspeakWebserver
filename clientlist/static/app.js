@@ -66,6 +66,7 @@ function updateTable(clientListData) {
 	if (clientListData === undefined)
 		return
 
+	clientListData.sort((a, b) => a.Clients.length > b.Clients.length ? -1 : 1)
 	for(let item of clientListData) {
 		html += `<ul class="list-channels">${item.ChannelName}`;
 		/* Start inserting clients */
