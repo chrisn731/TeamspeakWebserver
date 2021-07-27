@@ -194,7 +194,9 @@
 				socket.send(data)
 
 				ChatLog.append(`${text}\n`) // probably comment this out once server communication is set up
-				ChatLog.scrollTop = ChatLog.scrollHeight;
+				ChatLog.scrollTop = ChatLog.scrollHeight
+
+				ChatInput.value = ""
 			})
 
 			socket.onmessage = event => {
