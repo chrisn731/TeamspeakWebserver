@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"strconv"
 	"time"
@@ -16,12 +15,10 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-
-var validpath = regexp.MustCompile("^/$")
-
 var clients = make(map[*websocket.Conn]bool)
 var broadcast = make(chan ClientChatMessage)
 var mockData = make(chan Message)
+var tsc *TSConn = &TSConn{}
 
 const (
 	socketTimeoutSeconds = 5
@@ -76,49 +73,6 @@ func fetchClientTime() string {
 	cmd.Stderr = os.Stderr
 	cmd.Run()
 	return string(stdout.Bytes())
-}
-
-func fetchClientList() string {
-	var stdout bytes.Buffer
-
-	cmd := exec.Command("python", "clientlist.py", "-g")
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
-	if cmd.ProcessState.ExitCode() == -1 {
-		log.Fatal("clientlist.py failed.")
-	}
-	return string(stdout.Bytes())
-}
-
-func buildChannelClientMap() map[string][]string {
-	channelClientMap := make(map[string][]string)
-	clientList := fetchClientList()
-	f := func(c rune) bool {
-		return c == '\n'
-	}
-
-	// Different channels are newline seperated
-	channelClientLines := strings.FieldsFunc(clientList, f)
-	for _, line := range channelClientLines {
-		var clients []string = nil
-		// Different clients are tab character seperated
-		channelClientSplit := strings.Split(line, "\t")
-		channelName := channelClientSplit[0]
-		clientSplit := channelClientSplit[1:]
-
-		for _, clientName := range clientSplit {
-			/*
-			 * When we are splitting strings, make sure we
-			 * are not getting a blank string
-			 */
-			if len(clientName) > 0 {
-				clients = append(clients, strings.TrimSpace(clientName))
-			}
-		}
-		channelClientMap[channelName] = clients
-	}
-	return channelClientMap
 }
 
 func buildClientTime() []clientTimeEntry {
@@ -191,6 +145,9 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf(message.Message)
+			if err := tsc.sendGlobalMsg(message.Message); err != nil {
+				log.Println("Send Msg error: ", err)
+			}
 			/* Do things with the message here */
 			break
 		default:
@@ -210,14 +167,17 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 func fillData() {
 	for {
 		var shit Message
-		for k, v := range buildChannelClientMap() {
-			pair := ChannelClientPair{
-					ChannelName: k,
-					Clients: v,
-				}
-			shit.Data = append(shit.Data, pair)
+		chanClientMap, err := tsc.buildChannelClientMap()
+		if err == nil {
+			for k, v := range chanClientMap {
+				pair := ChannelClientPair{
+						ChannelName: k,
+						Clients: v,
+					}
+				shit.Data = append(shit.Data, pair)
+			}
+			mockData <- shit
 		}
-		mockData <- shit
 		time.Sleep(socketTimeout)
 	}
 }
@@ -253,6 +213,12 @@ func handleMessages() {
 }
 
 func main() {
+	ts, err := connectToServer()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer ts.closeConn()
+	tsc = ts
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", handleConnections)
 
