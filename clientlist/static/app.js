@@ -16,10 +16,6 @@ ChatSend.addEventListener("click", () => {
 		return
 	}
 
-	if (text.trim() <= 0) {
-		return
-	}
-
 	let message = {
 		ip: "blah.blah.blah", // Todo: get IP
 		message: text,
