@@ -10,7 +10,15 @@ let socket = new WebSocket("ws://" + document.location.host + "/ws");
 let debug = false
 
 ChatSend.addEventListener("click", () => {
-	let text = ChatInput.value
+	let text = ChatInput.value.trim()
+	if (text <= 0) {
+		ChatInput.value = ""
+		return
+	}
+
+	if (text.trim() <= 0) {
+		return
+	}
 
 	let message = {
 		ip: "blah.blah.blah", // Todo: get IP
