@@ -17,7 +17,8 @@ import (
 
 var clients = make(map[*websocket.Conn]bool)
 var broadcast = make(chan ClientChatMessage)
-var mockData = make(chan Message)
+var clientListChan = make(chan ChannelClientPairs)
+var serverMsgChan = make(chan string)
 var tsc *TSConn = &TSConn{}
 
 const (
@@ -29,6 +30,16 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
 	},
+}
+
+type ChannelClientPair struct {
+	ChannelName string `json:"ChannelName"`
+	Clients []string `json:"Clients"`
+}
+
+type ChannelClientPairs struct {
+	Header string `json:"header"`
+	Data []ChannelClientPair `json:"data"`
 }
 
 /* struct for receiving data */
@@ -48,14 +59,6 @@ type clientTimeEntry struct {
 	ClientName string
 }
 
-type Message struct {
-	Data []ChannelClientPair `json:"data"`
-}
-
-type ChannelClientPair struct {
-	ChannelName string
-	Clients []string
-}
 
 /*
  * For now, this is a  wrapper around the ClientList for when we use templates.
@@ -164,19 +167,20 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 
-func fillData() {
+func pushClientList() {
 	for {
-		var shit Message
+		var pairs ChannelClientPairs
 		chanClientMap, err := tsc.buildChannelClientMap()
 		if err == nil {
 			for k, v := range chanClientMap {
 				pair := ChannelClientPair{
 						ChannelName: k,
 						Clients: v,
-					}
-				shit.Data = append(shit.Data, pair)
+				}
+				pairs.Data = append(pairs.Data, pair)
 			}
-			mockData <- shit
+			pairs.Header = "clientlist"
+			clientListChan <- pairs
 		}
 		time.Sleep(socketTimeout)
 	}
@@ -197,8 +201,7 @@ func handleMessages() {
 					delete(clients, client)
 				}
 			}
-
-		case msg := <-mockData:
+		case msg := <-clientListChan:
 			for client := range clients {
 				err := client.WriteJSON(msg)
 				if err != nil {
@@ -207,23 +210,37 @@ func handleMessages() {
 					delete(clients, client)
 				}
 			}
-
+		case msg := <-serverMsgChan:
+			for client := range clients {
+				type servermsg struct {
+					Header string `json:"header"`
+					Msg string `json:"msg"`
+				}
+				smsg := servermsg{
+					Header: "servermsg",
+					Msg: msg,
+				}
+				client.WriteJSON(smsg)
+			}
 		}
 	}
 }
 
 func main() {
-	ts, err := connectToServer()
+	var err error
+
+	tsc, err = connectToServer()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer ts.closeConn()
-	tsc = ts
+	defer tsc.closeConn()
+
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", handleConnections)
 
 	go handleMessages()
-	go fillData()
+	go pushClientList()
+	go listenToServerMessages()
 	if err := http.ListenAndServe(":8081", nil); err != nil {
 		log.Fatal(err)
 	}

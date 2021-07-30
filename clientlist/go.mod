@@ -1,4 +1,4 @@
-module clientlist
+module tswebserver
 
 go 1.16
 

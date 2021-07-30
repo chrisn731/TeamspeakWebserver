@@ -51,7 +51,12 @@ socket.onmessage = event => {
 			}
 		}
 	}
-	updateTable(msg.data)
+	if (msg.header === "clientlist") {
+		updateTable(msg.data)
+	} else if (msg.header === "servermsg") {
+		let text = msg.msg
+		ChatLog.append(`${text}\n`)
+	}
 }
 
 socket.onopen = () => {
@@ -70,6 +75,11 @@ function updateTable(clientListData) {
 	if (clientListData === undefined)
 		return
 
+	if (clientListData === null) {
+		ChannelList.innerHTML = "<p>No one is currently online :(</p>"
+		return
+	}
+
 	clientListData.sort((a, b) => a.Clients.length > b.Clients.length ? -1 : 1)
 	for(let item of clientListData) {
 		html += `<ul class="list-channels">${item.ChannelName}`;
@@ -80,6 +90,5 @@ function updateTable(clientListData) {
 		}
 		html += '</ul></ul>'
 	}
-
 	ChannelList.innerHTML = html
 }

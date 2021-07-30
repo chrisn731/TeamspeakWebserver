@@ -1,5 +1,3 @@
-
-
 * {
     margin: 0;
     padding: 0;
@@ -94,7 +92,7 @@ ul {
 #chat-container > textarea {
     width: 100%;
     height: 200px;
-    
+
 }
 
 #chat-container > div {
@@ -112,6 +110,4 @@ ul {
 @keyframes pulse {
     from {transform: scale(1,1) rotate(15deg)}
     to {transform: scale(1.15,1.15) rotate(15deg)}
-  }
-
-  
+}
