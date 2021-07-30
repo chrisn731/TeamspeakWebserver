@@ -66,6 +66,7 @@ type clientTimeEntry struct {
  */
 type clientListPage struct {
 	ClientTimeEntries []clientTimeEntry
+	Motd string
 }
 
 func fetchClientTime() string {
@@ -102,6 +103,7 @@ func indexHandler(w http.ResponseWriter, r *http.Request) {
 	if req == "./" {
 		p := clientListPage{
 			ClientTimeEntries: buildClientTime(),
+			Motd: getMotd(),
 		}
 		t := template.Must(template.ParseFiles("./static/index.html"))
 		if err := t.Execute(w, p); err != nil {
