@@ -52,10 +52,9 @@ socket.onmessage = event => {
 		}
 	}
 	if (msg.header === "clientlist") {
-		updateTable(msg.data)
+		updateTable(msg.payload)
 	} else if (msg.header === "servermsg") {
-		let text = msg.msg
-		ChatLog.append(`${text}\n`)
+		ChatLog.append(`${msg.payload}\n`)
 	}
 }
 

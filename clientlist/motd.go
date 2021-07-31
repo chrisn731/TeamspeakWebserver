@@ -2,10 +2,10 @@ package main
 
 import (
 	"bufio"
-	"os"
-	"math/rand"
-	"time"
 	"log"
+	"math/rand"
+	"os"
+	"time"
 )
 
 const (
@@ -19,6 +19,7 @@ func populateMotds() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer file.Close()
 	scanner := bufio.NewScanner(file)
 
 	for scanner.Scan() {

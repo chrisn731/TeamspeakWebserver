@@ -2,18 +2,18 @@ package main
 
 import (
 	"bufio"
-	"net"
+	"github.com/multiplay/go-ts3"
 	"log"
+	"net"
 	"strings"
 	"time"
-	"github.com/multiplay/go-ts3"
 )
 
 const (
 	username = ""
 	password = ""
-	ip = "192.168.1.34"
-	port = "10011"
+	ip       = "192.168.1.34"
+	port     = "10011"
 )
 
 type TSConn struct {
@@ -110,9 +110,9 @@ func (c *TSConn) buildChannelClientMap() (map[string][]string, error) {
 func listenToServerMessages() {
 	// This struct's purpose is just to keep some records on the connection
 	type conn struct {
-		conn net.Conn
+		conn    net.Conn
 		scanner *bufio.Scanner
-		buf []byte
+		buf     []byte
 	}
 
 	var err error
@@ -120,12 +120,12 @@ func listenToServerMessages() {
 		buf: make([]byte, 4096),
 	}
 
-	if c.conn, err = net.Dial("tcp", ip + ":" + port); err != nil {
+	if c.conn, err = net.Dial("tcp", ip+":"+port); err != nil {
 		log.Fatal(err)
 	}
 
 	c.scanner = bufio.NewScanner(bufio.NewReader(c.conn))
-	c.scanner.Buffer(c.buf, 10 << 20)
+	c.scanner.Buffer(c.buf, 10<<20)
 	c.scanner.Split(ScanLines)
 	if !c.scanner.Scan() {
 		log.Fatal("Scan 1 failed")
@@ -139,7 +139,7 @@ func listenToServerMessages() {
 		log.Fatal("Scan 2 failed")
 	}
 
-	_, err = c.conn.Write([]byte("login " + username + " " +  password + "\n"));
+	_, err = c.conn.Write([]byte("login " + username + " " + password + "\n"))
 	if err != nil {
 		log.Fatal("Login write failed")
 	}
@@ -175,7 +175,7 @@ func listenToServerMessages() {
 				continue
 			}
 
-			onlyMsg := l[msgIDStart+4:msgEnd]
+			onlyMsg := l[msgIDStart+4 : msgEnd]
 			for _, word := range strings.Split(onlyMsg, "\\s") {
 				serverMsg += word + " "
 			}

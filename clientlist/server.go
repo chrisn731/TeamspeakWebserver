@@ -2,29 +2,60 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	_ "fmt"
+	"github.com/gorilla/websocket"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
 	"os/exec"
-	"strings"
 	"strconv"
+	"strings"
 	"time"
-	"encoding/json"
-	"github.com/gorilla/websocket"
 )
-
-var clients = make(map[*websocket.Conn]bool)
-var broadcast = make(chan ClientChatMessage)
-var clientListChan = make(chan ChannelClientPairs)
-var serverMsgChan = make(chan string)
-var tsc *TSConn = &TSConn{}
 
 const (
 	socketTimeoutSeconds = 5
-	socketTimeout = socketTimeoutSeconds * time.Second
+	socketTimeout        = socketTimeoutSeconds * time.Second
 )
+
+/* The general method for sending data over the Websocket */
+type SocketMessage struct {
+	Header  string      `json:"header"`
+	Payload interface{} `json:"payload"`
+}
+
+type ChannelClientPair struct {
+	ChannelName string   `json:"ChannelName"`
+	Clients     []string `json:"Clients"`
+}
+
+/* struct for receiving data */
+type ClientPackage struct {
+	Header  string `json:"header"`
+	Payload string `json:"payload"`
+}
+
+type ClientChatMessage struct {
+	IP      string `json:"ip"`
+	Message string `json:"message"`
+	Time    string `json:"time"`
+}
+
+type clientTimeEntry struct {
+	TotalTime  uint64
+	ClientName string
+}
+
+/*
+ * For now, this is a wrapper around the ClientList for when we use templates.
+ * Eventually more things will be added, I think.
+ */
+type indexPage struct {
+	ClientTimeEntries []clientTimeEntry
+	Motd              string
+}
 
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
@@ -32,42 +63,11 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
-type ChannelClientPair struct {
-	ChannelName string `json:"ChannelName"`
-	Clients []string `json:"Clients"`
-}
-
-type ChannelClientPairs struct {
-	Header string `json:"header"`
-	Data []ChannelClientPair `json:"data"`
-}
-
-/* struct for receiving data */
-type ClientPackage struct {
-	Header string `json:"header"`
-	Payload string `json:"payload"`
-}
-
-type ClientChatMessage struct {
-	IP string `json:"ip"`
-	Message string `json:"message"`
-	Time string `json:"time"`
-}
-
-type clientTimeEntry struct {
-	TotalTime uint64
-	ClientName string
-}
-
-
-/*
- * For now, this is a  wrapper around the ClientList for when we use templates.
- * Eventually more things will be added, I think.
- */
-type clientListPage struct {
-	ClientTimeEntries []clientTimeEntry
-	Motd string
-}
+var clients = make(map[*websocket.Conn]bool)
+var broadcast = make(chan ClientChatMessage)
+var clientListChan = make(chan []ChannelClientPair)
+var serverMsgChan = make(chan string)
+var tsc *TSConn = nil
 
 func fetchClientTime() string {
 	var stdout bytes.Buffer
@@ -95,21 +95,21 @@ func buildClientTime() []clientTimeEntry {
 		name := timeNameSplit[1]
 		entries = append(entries, clientTimeEntry{TotalTime: time, ClientName: name})
 	}
-	return entries;
+	return entries
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	req := "." + r.URL.Path
 	if req == "./" {
-		p := clientListPage{
+		p := indexPage{
 			ClientTimeEntries: buildClientTime(),
-			Motd: getMotd(),
+			Motd:              getMotd(),
 		}
 		t := template.Must(template.ParseFiles("./static/index.html"))
 		if err := t.Execute(w, p); err != nil {
 			panic(err)
 		}
-	} else  {
+	} else {
 		req = "./static/" + r.URL.Path
 		info, err := os.Stat(req)
 		if err != nil && os.IsNotExist(err) || info.IsDir() {
@@ -168,22 +168,25 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-
 func pushClientList() {
 	for {
-		var pairs ChannelClientPairs
+		var pairs []ChannelClientPair
+
 		chanClientMap, err := tsc.buildChannelClientMap()
-		if err == nil {
-			for k, v := range chanClientMap {
-				pair := ChannelClientPair{
-						ChannelName: k,
-						Clients: v,
-				}
-				pairs.Data = append(pairs.Data, pair)
-			}
-			pairs.Header = "clientlist"
-			clientListChan <- pairs
+		if err != nil {
+			// TODO: Push an error to the client
+			time.Sleep(socketTimeout)
+			continue
 		}
+
+		for k, v := range chanClientMap {
+			pair := ChannelClientPair{
+				ChannelName: k,
+				Clients:     v,
+			}
+			pairs = append(pairs, pair)
+		}
+		clientListChan <- pairs
 		time.Sleep(socketTimeout)
 	}
 }
@@ -205,7 +208,11 @@ func handleMessages() {
 			}
 		case msg := <-clientListChan:
 			for client := range clients {
-				err := client.WriteJSON(msg)
+				sockMsg := SocketMessage{
+					Header:  "clientlist",
+					Payload: msg,
+				}
+				err := client.WriteJSON(sockMsg)
 				if err != nil {
 					log.Printf("error: %v", err)
 					client.Close()
@@ -214,15 +221,11 @@ func handleMessages() {
 			}
 		case msg := <-serverMsgChan:
 			for client := range clients {
-				type servermsg struct {
-					Header string `json:"header"`
-					Msg string `json:"msg"`
+				sockMsg := SocketMessage{
+					Header:  "servermsg",
+					Payload: msg,
 				}
-				smsg := servermsg{
-					Header: "servermsg",
-					Msg: msg,
-				}
-				client.WriteJSON(smsg)
+				client.WriteJSON(sockMsg)
 			}
 		}
 	}
