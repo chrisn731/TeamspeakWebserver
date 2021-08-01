@@ -9,7 +9,15 @@ const Motd = document.getElementById("motd")
 let socket = new WebSocket("ws://" + document.location.host + "/ws");
 let debug = false
 
-ChatSend.addEventListener("click", () => {
+ChatInput.addEventListener("keypress", event => {
+	if (event.code == "Enter") {
+		sendChatMessage()
+	}
+})
+
+ChatSend.addEventListener("click", sendChatMessage)
+
+function sendChatMessage() {
 	let text = ChatInput.value.trim()
 	if (text <= 0) {
 		ChatInput.value = ""
@@ -38,7 +46,7 @@ ChatSend.addEventListener("click", () => {
 	ChatLog.append(`${text}\n`) // probably comment this out once server communication is set up
 	ChatLog.scrollTop = ChatLog.scrollHeight
 	ChatInput.value = ""
-})
+}
 
 socket.onmessage = event => {
 	let msg = JSON.parse(event.data)
