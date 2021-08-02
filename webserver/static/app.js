@@ -10,7 +10,7 @@ let socket = new WebSocket("ws://" + document.location.host + "/ws");
 let debug = false
 
 ChatInput.addEventListener("keypress", event => {
-	if (event.code == "Enter") {
+	if (event.code == "Enter" || event.code == "NumpadEnter") {
 		sendChatMessage()
 	}
 })
