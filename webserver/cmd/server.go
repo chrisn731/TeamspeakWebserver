@@ -1,18 +1,15 @@
-package main
+package cmd
 
 import (
-	"bytes"
 	"encoding/json"
-	_ "fmt"
 	"github.com/gorilla/websocket"
 	"html/template"
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
-	"strconv"
-	"strings"
 	"time"
+	"tswebserver/cmd/clienttime"
+	"tswebserver/cmd/tsc"
 )
 
 const (
@@ -24,11 +21,6 @@ const (
 type SocketMessage struct {
 	Header  string      `json:"header"`
 	Payload interface{} `json:"payload"`
-}
-
-type ChannelClientPair struct {
-	ChannelName string   `json:"ChannelName"`
-	Clients     []string `json:"Clients"`
 }
 
 /* struct for receiving data */
@@ -43,17 +35,12 @@ type ClientChatMessage struct {
 	Time    string `json:"time"`
 }
 
-type clientTimeEntry struct {
-	TotalTime  uint64
-	ClientName string
-}
-
 /*
  * For now, this is a wrapper around the ClientList for when we use templates.
  * Eventually more things will be added, I think.
  */
 type indexPage struct {
-	ClientTimeEntries []clientTimeEntry
+	ClientTimeEntries []clienttime.ClientTimeEntry
 	Motd              string
 }
 
@@ -65,44 +52,13 @@ var upgrader = websocket.Upgrader{
 
 var clients = make(map[*websocket.Conn]bool)
 var broadcast = make(chan ClientChatMessage)
-var clientListChan = make(chan []ChannelClientPair)
-var serverMsgChan = make(chan string)
-var tsc *TSConn = nil
-
-func fetchClientTime() string {
-	var stdout bytes.Buffer
-
-	cmd := exec.Command("../ltc/ltc", "-h", "10", "-s", "../logs")
-	cmd.Stdout = &stdout
-	cmd.Stderr = os.Stderr
-	cmd.Run()
-	return string(stdout.Bytes())
-}
-
-func buildClientTime() []clientTimeEntry {
-	var entries []clientTimeEntry = nil
-	times := strings.Split(fetchClientTime(), "\n")
-
-	for _, line := range times {
-		timeNameSplit := strings.Split(line, "\t")
-		if len(line) <= 0 {
-			continue
-		}
-		time, err := strconv.ParseUint(timeNameSplit[0], 10, 64)
-		if err != nil {
-			panic(err)
-		}
-		name := timeNameSplit[1]
-		entries = append(entries, clientTimeEntry{TotalTime: time, ClientName: name})
-	}
-	return entries
-}
+var tsconn *tsc.TSConn = nil
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	req := "." + r.URL.Path
 	if req == "./" {
 		p := indexPage{
-			ClientTimeEntries: buildClientTime(),
+			ClientTimeEntries: clienttime.BuildClientTimes(),
 			Motd:              getMotd(),
 		}
 		t := template.Must(template.ParseFiles("./static/index.html"))
@@ -150,7 +106,7 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			log.Printf(message.Message)
-			if err := tsc.sendGlobalMsg(message.Message); err != nil {
+			if err := tsconn.SendGlobalMsg(message.Message); err != nil {
 				log.Println("Send Msg error: ", err)
 			}
 			/* Do things with the message here */
@@ -165,29 +121,6 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 
-	}
-}
-
-func pushClientList() {
-	for {
-		var pairs []ChannelClientPair
-
-		chanClientMap, err := tsc.buildChannelClientMap()
-		if err != nil {
-			// TODO: Push an error to the client
-			time.Sleep(socketTimeout)
-			continue
-		}
-
-		for k, v := range chanClientMap {
-			pair := ChannelClientPair{
-				ChannelName: k,
-				Clients:     v,
-			}
-			pairs = append(pairs, pair)
-		}
-		clientListChan <- pairs
-		time.Sleep(socketTimeout)
 	}
 }
 
@@ -206,7 +139,7 @@ func handleMessages() {
 					delete(clients, client)
 				}
 			}
-		case msg := <-clientListChan:
+		case msg := <-tsc.ClientListChan:
 			for client := range clients {
 				sockMsg := SocketMessage{
 					Header:  "clientlist",
@@ -219,7 +152,7 @@ func handleMessages() {
 					delete(clients, client)
 				}
 			}
-		case msg := <-serverMsgChan:
+		case msg := <-tsc.ServerMsgChan:
 			for client := range clients {
 				sockMsg := SocketMessage{
 					Header:  "servermsg",
@@ -231,21 +164,21 @@ func handleMessages() {
 	}
 }
 
-func main() {
+func StartServer() {
 	var err error
 
-	tsc, err = connectToServer()
+	tsconn, err = tsc.ConnectToServer()
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer tsc.closeConn()
+	defer tsconn.CloseConn()
 
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", handleConnections)
 
 	go handleMessages()
-	go pushClientList()
-	go listenToServerMessages()
+	go tsc.PushClientList(tsconn)
+	go tsc.ListenToServerMessages()
 	if err := http.ListenAndServe(":8081", nil); err != nil {
 		log.Fatal(err)
 	}

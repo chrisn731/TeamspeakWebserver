@@ -92,6 +92,7 @@ function updateTable(clientListData) {
 		html += `<ul class="list-channels">${item.ChannelName}`;
 		/* Start inserting clients */
 		html += "<li><ul class='list-clients'>";
+		item.Clients.sort()
 		for (let client of item.Clients) {
 			html += `<li>${client}</li>`
 		}
