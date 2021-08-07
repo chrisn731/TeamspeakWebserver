@@ -5,6 +5,7 @@
 	<link rel="icon"href="https://img.rankedboost.com/wp-content/uploads/2014/09/Season_2019_-_Challenger_1.png" type=image/x-icon>
 	<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.9.4/Chart.js"></script>
 	<link rel="stylesheet" type="text/css" href="style.css">
+	<script src="chartcolors.js"></script>
 	<script defer src="app.js"></script>
 </head>
 
@@ -58,9 +59,18 @@
 					{{ end }}
 
 					],
-					backgroundColor: ["red", "blue", "green", "yellow", "purple", "orange", "pink", "lime", "maroon", "cyan"],
+					backgroundColor: chartColors,
 					hoverOffset: 4,
 				}]
+			},
+			options: {
+				legend: {
+					labels: {
+						fontColor: "#FFFFFF",
+						fontSize: 12,
+					}
+
+				}
 			},
 		});
 	</script>

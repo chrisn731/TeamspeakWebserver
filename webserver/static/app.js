@@ -10,7 +10,7 @@ let socket = new WebSocket("ws://" + document.location.host + "/ws");
 let debug = false
 
 ChatInput.addEventListener("keypress", event => {
-	if (event.code == "Enter" || event.code == "NumpadEnter") {
+	if (event.key == "Enter") {
 		sendChatMessage()
 	}
 })
@@ -79,14 +79,19 @@ socket.onerror = error => { };
 function updateTable(clientListData) {
 	let html = "";
 
-	if (clientListData === undefined)
+	if (clientListData === undefined) {
+		ChannelList.innerHTML = "<p>Error while loading clientlist</p>"
 		return
+	}
 
 	if (clientListData === null) {
 		ChannelList.innerHTML = "<p>No one is currently online :(</p>"
 		return
 	}
 
+	// First sort by channel name...
+	clientListData.sort((a, b) => a.ChannelName > b.ChannelName ? -1 : 1)
+	// ... then sort by how many clients are in each channel
 	clientListData.sort((a, b) => a.Clients.length > b.Clients.length ? -1 : 1)
 	for(let item of clientListData) {
 		html += `<ul class="list-channels">${item.ChannelName}`;

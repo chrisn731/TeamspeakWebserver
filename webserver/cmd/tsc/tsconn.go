@@ -41,7 +41,7 @@ func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 }
 
 func ConnectToServer() (*TSConn, error) {
-	c, err := ts3.NewClient("192.168.1.34:10011")
+	c, err := ts3.NewClient(ip + ":" + port)
 	if err != nil {
 		return nil, err
 	}
