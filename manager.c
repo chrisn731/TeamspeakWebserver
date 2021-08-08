@@ -19,6 +19,7 @@
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define LOG_FILE_PATH "/tmp/ts_manager_log.txt"
@@ -26,11 +27,12 @@
 #define WEBSERVER_PATH "./tswebserver"
 #define BOT_PATH "./bot.py"
 #define MAX_CMD_LEN 4096
+#define LOG_BUF_SIZE (1 << 18)
 
-#define NOTREACHED()							\
-	do {								\
-		fprintf(stderr, "Not reached area reached in %s : %d",	\
-				__func__, __LINE__);			\
+#define NOTREACHED() \
+	do {							\
+		die("Not reached area reached in %s : %d",	\
+				__func__, __LINE__);		\
 	} while (0)
 
 #ifndef SUN_LEN
@@ -52,28 +54,70 @@ static struct module_info ts_bot = {
 
 static int bot_pid = -1;
 static int server_pid = -1;
-
-
-/* Fatal error. Program execution should no longer continue. */
-static void die(const char *fmt, ...)
-{
-	int errv = errno;
-	va_list argp;
-
-	va_start(argp, fmt);
-	vfprintf(stderr, fmt, argp);
-	va_end(argp);
-	fprintf(stderr, " - %s", strerror(errv));
-	fputc('\n', stderr);
-	exit(1);
-}
+static char __log_buf[LOG_BUF_SIZE];
 
 static void usage(const char *self)
 {
 	fprintf(stdout,
-		"Usage: %s [ ]\n",
+		"Usage: %s [-s {command} | [-a] [-w] [-b]]\n"
+		"  -s    Send a command to the currently running manager\n"
+		"  -a    Start the manager with all modules\n"
+		"  -b    Start the manager with only the bot\n"
+		"  -w    Start the manager with only the webserver\n",
 		self);
 	exit(1);
+}
+
+enum {
+	LOG_INFO,
+	LOG_ERR,
+	LOG_FATAL,
+};
+
+static void do_log(int log_level, const char *fmt, va_list args)
+{
+	size_t nw = 0;
+	char *buffer = __log_buf;
+	int errv = errno;
+
+	switch (log_level) {
+	case LOG_ERR:
+		nw += snprintf(buffer, LOG_BUF_SIZE, "[ERR] ");
+		break;
+	case LOG_FATAL:
+		nw += snprintf(buffer, LOG_BUF_SIZE, "[FATAL] ");
+		break;
+	case LOG_INFO:
+		nw += snprintf(buffer, LOG_BUF_SIZE, "[NORM] ");
+	default:
+		break;
+	}
+	nw += vsnprintf(buffer + nw, LOG_BUF_SIZE - nw, fmt, args);
+	if (log_level == LOG_FATAL)
+		nw += snprintf(buffer + nw, LOG_BUF_SIZE - nw, " - %s",
+							strerror(errv));
+	buffer[nw] = '\n';
+	write(STDERR_FILENO, buffer, nw + 1);
+}
+
+/* Fatal error. Program execution should no longer continue. */
+static void die(const char *fmt, ...)
+{
+	va_list argp;
+
+	va_start(argp, fmt);
+	do_log(LOG_FATAL, fmt, argp);
+	va_end(argp);
+	exit(1);
+}
+
+/* Normal level logging */
+static void logit(const char *fmt, ...)
+{
+	va_list argp;
+	va_start(argp, fmt);
+	do_log(LOG_INFO, fmt, argp);
+	va_end(argp);
 }
 
 /*
@@ -85,16 +129,16 @@ static void log_err(const char *fmt, ...)
 {
 	va_list argp;
 	va_start(argp, fmt);
-	vfprintf(stderr, fmt, argp);
+	do_log(LOG_FATAL, fmt, argp);
 	va_end(argp);
-	fputc('\n', stderr);
 }
+
 
 static int init_bot(void)
 {
 	char *const bot_argv[] = {"python", BOT_PATH, NULL};
 
-	printf("Attempting to start up bot...\n");
+	logit("Attempting to start up bot...");
 	bot_pid = fork();
 	switch (bot_pid) {
 	case -1:
@@ -116,7 +160,7 @@ static int init_server(void)
 {
 	char *const server_argv[] = {WEBSERVER_PATH, NULL};
 
-	printf("Attempting to start up server...\n");
+	logit("Attempting to start up server...");
 	server_pid = fork();
 	switch (server_pid) {
 	case -1:
@@ -124,9 +168,11 @@ static int init_server(void)
 		return -1;
 	case 0:
 		prctl(PR_SET_PDEATHSIG, SIGHUP);
-		chdir("./webserver");
-		execvp(WEBSERVER_PATH, server_argv);
-		die("[SERVER ERR] - failed to startup server");
+		if (chdir("./webserver") < 0)
+			log_err("Could not change into webserver directory.");
+		else
+			execvp(WEBSERVER_PATH, server_argv);
+		log_err("[SERVER ERR] - failed to startup server");
 		_exit(1);
 		break;
 	default:
@@ -142,17 +188,27 @@ static int init_server(void)
  */
 static void child_death_handler(int signum)
 {
-	if (bot_pid > 0 && kill(bot_pid, 0))
+	pid_t dead_child;
+	int status = 0;
+
+	dead_child = wait(&status);
+	if (bot_pid == dead_child) {
+		logit("%s: Attempting to restart bot that exited with code (%d)",
+							__func__, status);
 		init_bot();
-	if (server_pid > 0 && kill(server_pid, 0))
+	} else if (server_pid == dead_child) {
+		logit("%s: Attempting to restart server that exited with code (%d)",
+							__func__, status);
 		init_server();
+	}
 }
 
 static inline int setup_child_death_handler(void)
 {
-	struct sigaction act;
+	struct sigaction act = {
+		.sa_handler = child_death_handler
+	};
 
-	act.sa_handler = child_death_handler;
 	return sigaction(SIGCHLD, &act, NULL);
 }
 
@@ -233,8 +289,12 @@ static void send_command(const char *arg)
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
 	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
-	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		die("Error connecting.");
+	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0) {
+		if (errno == ENOENT)
+			die("Manager not currently running.");
+		else
+			die("Error connecting.");
+	}
 
 	if (strlen(arg) > MAX_CMD_LEN)
 		die("%s is longer than the max command length", arg);
@@ -244,7 +304,11 @@ static void send_command(const char *arg)
 		die("Error closing socket fd");
 }
 
-
+/*
+ * Kill wrapper to terminate children of the manager.
+ * First attempts to be kind and terminate them. If that does not work
+ * sends a SIGKILL as last resort.
+ */
 static int kill_pid(int pid)
 {
 	int err;
@@ -255,12 +319,21 @@ static int kill_pid(int pid)
 	return err;
 }
 
+/*
+ * Manager shutdown routine.
+ *
+ * Main steps:
+ * 	1. Attempt to kindly TERMinate children (kill if stubborn)
+ * 	2. Remove socket
+ * 	3. exit()
+ */
 static void shutdown_manager(int sfd)
 {
 	struct sigaction act = {
 		.sa_handler = SIG_DFL
 	};
 
+	/* We are going to be killing children. Ignore SIGCHLD. */
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
 		log_err("Error reseting child death handler.");
 
@@ -268,32 +341,41 @@ static void shutdown_manager(int sfd)
 		if (kill_pid(bot_pid) < 0)
 			log_err("Error killing bot - pid: %d", bot_pid);
 		else
-			printf("Bot shutdown complete.\n");
+			logit("Bot shutdown complete.");
 	}
 
 	if (server_pid > 0) {
 		if (kill_pid(server_pid) < 0)
 			log_err("Error killing server - pid: %d", server_pid);
 		else
-			printf("Server shutdown complete.\n");
+			logit("Server shutdown complete.");
 	}
 	if (remove(MANAGER_SOCK_PATH) < 0)
 		log_err("Error removing sock from fs");
+	close(sfd);
 	exit(0);
 }
 
-enum {
+/* New manager commands should be added to this enum */
+enum manager_cmds {
 	CMD_NONE,
 	CMD_SHUTDOWN,
 };
 
-static int manager_process_input(const char *input)
+static enum manager_cmds manager_process_input(const char *input)
 {
 	if (!strcmp(input, "stop"))
 		return CMD_SHUTDOWN;
 	return CMD_NONE;
 }
 
+/*
+ * The importance of this function lies in the fact that the manager _should_
+ * be stuck at accept until something happens (child death/connection).
+ * The important thing to note is the child death. If a child dies during a
+ * call to accept, it will return an error of EINTR. Thus, if accept does return
+ * this error, we should not be worried and instead just recall it.
+ */
 static inline int manager_accept(int sfd)
 {
 	int cfd;
@@ -303,7 +385,30 @@ static inline int manager_accept(int sfd)
 	return cfd;
 }
 
-
+/*
+ * Main manager loop.
+ *
+ * At this point we have:
+ * 	+ Loaded all requested modules (bot, server) requested.
+ * 	+ Initalized the log file
+ * 	+ Daemonized
+ * 	+ Have a working local Unix socket for IPC and receiving commands
+ * 	+ Registered a child death signal handler
+ *
+ * Now enter an infinite loop that starts by calling accept() and waiting
+ * for a command or event to come up.
+ *
+ * Important things to remember:
+ *  - accept() is BLOCKING therefore as soon as we come into here the manager
+ *  will be put to sleep by the kernel until a connection to its socket is
+ *  attempted. Therefore, there should be little to no stress on the cpu from
+ *  the manager.
+ *
+ *  - We could possbily halt the execution of this loop from an event. More
+ *  specifically, if a child process was to die. Therefore it is imperative
+ *  to make sure that system calls being made handle EINTR - see errno(3).
+ *  For a concrete example of what I mean, see manager_accept.
+ */
 static void start_manager_loop(int sfd)
 {
 	for (;;) {
@@ -375,6 +480,10 @@ int main(int argc, char **argv)
 			break;
 		}
 	}
+	argv += optind;
+	argc -= optind;
+	if (*argv)
+		usage(self_name);
 
 	sfd = init_manager();
 
