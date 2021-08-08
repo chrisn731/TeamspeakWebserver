@@ -1,224 +1,395 @@
+/*
+ * Teamspeak Manager
+ *
+ * The purpose of this is to manage and control the teamspeak bot
+ * and webserver. It is able to automatically stop, restart, and
+ * recover a crashed process.
+ *
+ * When spawed, it daemonizes itself and creates a socket in order to
+ * receieve commandsla
+ */
+#include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
+#include <getopt.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <sys/wait.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
-#define TS_BOT_NAME	"main.py"
-#define PIPE_NAME 	"/tmp/ts_bot_pipe"
-#define LOG_FILE_NAME	"/tmp/bot_manager_log"
+#define LOG_FILE_PATH "/tmp/ts_manager_log.txt"
+#define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
+#define WEBSERVER_PATH "./tswebserver"
+#define BOT_PATH "./bot.py"
+#define MAX_CMD_LEN 4096
 
-#define MAX_CMD_LEN	4096
-static FILE *log_file;
+#define NOTREACHED()							\
+	do {								\
+		fprintf(stderr, "Not reached area reached in %s : %d",	\
+				__func__, __LINE__);			\
+	} while (0)
 
+#ifndef SUN_LEN
+# define SUN_LEN(su) \
+	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
+#endif
+
+/*
+ * Commented out for now bc idk the direction i wanna go
+struct module_info {
+	int pipefds[2];
+	int pid;
+};
+
+static struct module_info ts_bot = {
+	.pid = -1,
+}
+*/
+
+static int bot_pid = -1;
+static int server_pid = -1;
+
+
+/* Fatal error. Program execution should no longer continue. */
 static void die(const char *fmt, ...)
 {
+	int errv = errno;
 	va_list argp;
+
 	va_start(argp, fmt);
-	fprintf(stderr, fmt, argp);
+	vfprintf(stderr, fmt, argp);
 	va_end(argp);
+	fprintf(stderr, " - %s", strerror(errv));
 	fputc('\n', stderr);
 	exit(1);
 }
 
-#define LOG_NORM	0
-#define LOG_DIE		1
-static void _log(int type, const char *fmt, ...)
+static void usage(const char *self)
 {
-	va_list argp;
-	va_start(argp, fmt);
-	fprintf(log_file, fmt, argp);
-	va_end(argp);
-	fputc('\n', log_file);
-	if (type == LOG_DIE) {
-		fclose(log_file);
-		exit(1);
-	}
-}
-
-/*
- * Signal handler to clean up for if the bot dies. If it dies without us knowing,
- * clean up and shut down nicely.
- */
-static void child_death_handler(int signnum)
-{
-	_log(LOG_NORM, "Child died unexpectedly. Shutting down.");
-	fclose(log_file);
-	unlink(PIPE_NAME);
+	fprintf(stdout,
+		"Usage: %s [ ]\n",
+		self);
 	exit(1);
 }
 
-static int kill_bot(int pid)
+/*
+ * Only purpose of this function is to make the code verbose in saying that
+ * "Hey something pretty bad happened, but just write it down and keep going."
+ * Also so I do not have to write "\n" every damn time.
+ */
+static void log_err(const char *fmt, ...)
 {
-	int err;
-
-	_log(LOG_NORM, "Sending kill signal to bot.");
-	if (signal(SIGCHLD, SIG_DFL) < 0)
-		_log(LOG_NORM, "(%s) Failed to release signal handler.", __func__);
-	err = kill(pid, SIGTERM);
-	if (err) {
-		/* We gave it a chance to end peacefully... */
-		_log(LOG_NORM, "Error while sending SIGTERM, sending SIGKILL.");
-		err = kill(pid, SIGKILL);
-		if (err)
-			_log(LOG_NORM, "Error while sending SIGKILL to bot.");
-	}
-	return err;
+	va_list argp;
+	va_start(argp, fmt);
+	vfprintf(stderr, fmt, argp);
+	va_end(argp);
+	fputc('\n', stderr);
 }
 
-static int wait_for_cmd(int cid)
+static int init_bot(void)
 {
-	int pipefd;
-	struct pollfd pfds[1];
+	char *const bot_argv[] = {"python", BOT_PATH, NULL};
 
-	if (signal(SIGCHLD, child_death_handler) < 0) {
-		_log(LOG_NORM, "Failed to create signal handler for manager.");
-		goto fail_signal;
+	printf("Attempting to start up bot...\n");
+	bot_pid = fork();
+	switch (bot_pid) {
+	case -1:
+		log_err("Error forking while trying to init bot");
+		return -1;
+	case 0:
+		prctl(PR_SET_PDEATHSIG, SIGHUP);
+		execv("/bin/python", bot_argv);
+		log_err("[BOT ERR] - failed to startup bot");
+		_exit(1);
+		break;
+	default:
+		break;
 	}
+	return 0;
+}
 
-	pipefd = open(PIPE_NAME, O_RDONLY | O_NONBLOCK);
-	if (pipefd < 0) {
-		_log(LOG_NORM, "Failed to open pipe.");
-		goto fail_open;
+static int init_server(void)
+{
+	char *const server_argv[] = {WEBSERVER_PATH, NULL};
+
+	printf("Attempting to start up server...\n");
+	server_pid = fork();
+	switch (server_pid) {
+	case -1:
+		log_err("Error forking while trying to init server");
+		return -1;
+	case 0:
+		prctl(PR_SET_PDEATHSIG, SIGHUP);
+		chdir("./webserver");
+		execvp(WEBSERVER_PATH, server_argv);
+		die("[SERVER ERR] - failed to startup server");
+		_exit(1);
+		break;
+	default:
+		break;
 	}
-	pfds->fd = pipefd;
-	pfds->events = POLLIN;
+	return 0;
+}
 
-	_log(LOG_NORM, "Manager successfully initalized. Starting to listen...");
-	for (;;) {
-		char buf[MAX_CMD_LEN];
-		int nr;
+/*
+ * TODO: Make init_bot && init_server reentrant so that
+ * calling them from the signal handler is not unsafe. For
+ * now, this will do.
+ */
+static void child_death_handler(int signum)
+{
+	if (bot_pid > 0 && kill(bot_pid, 0))
+		init_bot();
+	if (server_pid > 0 && kill(server_pid, 0))
+		init_server();
+}
 
-		if (poll(pfds, 1, -1) < 0) {
-			_log(LOG_NORM, "Failed to poll.");
-			break;
-		}
+static inline int setup_child_death_handler(void)
+{
+	struct sigaction act;
 
-		nr = read(pfds->fd, buf, sizeof(buf) - 1);
-		if (nr < 0) {
-			_log(LOG_NORM, "Reading from pipe failed.");
-			break;
-		}
+	act.sa_handler = child_death_handler;
+	return sigaction(SIGCHLD, &act, NULL);
+}
 
-		if (!strcmp(buf, "close")) {
-			_log(LOG_NORM, "Received close command. Shutting down bot.");
-			break;
-		}
-		memset(buf, 0, nr);
+/* Make sure that the commands we are going to send are correct */
+static int sanitize_command(const char *cmd)
+{
+	return strcmp(cmd, "stop");
+}
+
+/*
+ * We want all our output to be redirected to a log file so that when
+ * we daemonize we can still see errors and such if something was to
+ * go wrong.
+ */
+static void init_manager_log_file(void)
+{
+	int fd;
+
+	fd = open(LOG_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0)
+		die("Error opening/creating manager log file");
+	if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0)
+		die("dup2: Error duping");
+	close(fd);
+}
+
+/*
+ * Setup a local Unix socket for IPC.
+ * Used so that we can just recall this program with the '-s/-S' flag
+ * and send a command so we can dynamically interact with the loaded
+ * and running modules without having to completely kill and restart
+ * the manager.
+ */
+static int setup_comm_socket(void)
+{
+	struct sockaddr_un sa;
+	int sfd;
+
+	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (sfd < 0)
+		die("Error creating socket file descriptor");
+
+	sa.sun_family = AF_LOCAL;
+	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
+	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
+
+retry:
+	if (bind(sfd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0) {
+		if (errno == EADDRINUSE) {
+			remove(MANAGER_SOCK_PATH);
+			goto retry;
+		} else
+			die("Error while attempting to bind");
 	}
-	close(pipefd);
-fail_open:
-	unlink(PIPE_NAME);
-fail_signal:
-	fclose(log_file);
-	return kill_bot(cid);
+	if (listen(sfd, 1) < 0)
+		die("Error setting up socket to listen.");
+	return sfd;
 }
 
 static int init_manager(void)
 {
-	int status;
-	pid_t pid;
+	init_manager_log_file();
+	if (daemon(1, 1) < 0)
+		die("Error daemonizing");
+	return setup_comm_socket();
+}
 
-	if (!access(PIPE_NAME, F_OK))
-		die("Manager already running.");
+static void send_command(const char *arg)
+{
+	struct sockaddr_un sa;
+	int fd;
 
-	log_file = fopen(LOG_FILE_NAME, "w");
-	if (!log_file)
-		die("Failed to open log file.");
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		die("Error creating socket file descriptor");
 
-	_log(LOG_NORM, "Initializing manager...");
-	pid = fork();
-	if (!pid) {
-		/*
-		 * Double fork so we can detach and not create a zombie
-		 */
-		pid_t cpid = fork();
-		if (!cpid) {
-			/*
-			 * Do not allow the bot or manager to link to any
-			 * device / terminal.
-			 */
-			if (daemon(1, 0) < 0)
-				_log(LOG_DIE, "Failed to daemonize.");
-			if (mkfifo(PIPE_NAME, 0666) < 0)
-				_log(LOG_DIE, "Failed to make fifo");
+	sa.sun_family = AF_LOCAL;
+	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
+	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
-			cpid = fork();
-			if (!cpid) {
-				execl("/bin/python", "python", TS_BOT_NAME, NULL);
-				_log(LOG_DIE, "ERROR: execl failed.");
-			} else if (cpid > 0) {
-				_exit(wait_for_cmd(cpid));
-			} else {
-				_log(LOG_DIE, "Failed to do final manager fork.");
-			}
-		}
-		_exit(cpid > 0 ? 0 : 1);
+	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
+		die("Error connecting.");
+
+	if (strlen(arg) > MAX_CMD_LEN)
+		die("%s is longer than the max command length", arg);
+	if (write(fd, arg, strlen(arg)) != strlen(arg))
+		die("Error writing to socket.");
+	if (close(fd) < 0)
+		die("Error closing socket fd");
+}
+
+
+static int kill_pid(int pid)
+{
+	int err;
+
+	err = kill(pid, SIGTERM);
+	if (err)
+		err = kill(pid, SIGKILL);
+	return err;
+}
+
+static void shutdown_manager(int sfd)
+{
+	struct sigaction act = {
+		.sa_handler = SIG_DFL
+	};
+
+	if (sigaction(SIGCHLD, &act, NULL) < 0)
+		log_err("Error reseting child death handler.");
+
+	if (bot_pid > 0) {
+		if (kill_pid(bot_pid) < 0)
+			log_err("Error killing bot - pid: %d", bot_pid);
+		else
+			printf("Bot shutdown complete.\n");
 	}
-	if (pid < 0)
-		die("Error forking.");
-	if (waitpid(pid, &status, 0) < 0)
-		die("Error while waiting for child (%d)", pid);
-	if (!WIFEXITED(status))
-		die("Child did not exit successfully while initializing manager.");
-	return 0;
+
+	if (server_pid > 0) {
+		if (kill_pid(server_pid) < 0)
+			log_err("Error killing server - pid: %d", server_pid);
+		else
+			printf("Server shutdown complete.\n");
+	}
+	if (remove(MANAGER_SOCK_PATH) < 0)
+		log_err("Error removing sock from fs");
+	exit(0);
 }
 
-static int send_command(const char *cmd)
+enum {
+	CMD_NONE,
+	CMD_SHUTDOWN,
+};
+
+static int manager_process_input(const char *input)
 {
-	int pipefd;
-
-	if (access(PIPE_NAME, F_OK) < 0)
-		die("Manager not currently running.");
-	if (strlen(cmd) >= MAX_CMD_LEN)
-		die("Command too long to be interpretd.");
-
-	pipefd = open(PIPE_NAME, O_WRONLY | O_NONBLOCK);
-	if (pipefd < 0)
-		die("Pipe opening failed.");
-	if (write(pipefd, cmd, strlen(cmd)) != strlen(cmd))
-		die("Write to pipe error.");
-	if (close(pipefd) < 0)
-		die("Closing pipe error.");
-	return 0;
+	if (!strcmp(input, "stop"))
+		return CMD_SHUTDOWN;
+	return CMD_NONE;
 }
 
-static int restart_manager(void)
+static inline int manager_accept(int sfd)
 {
-	send_command("close");
-	return init_manager();
+	int cfd;
+	do {
+		cfd = accept(sfd, NULL, NULL);
+	} while (errno == EINTR);
+	return cfd;
 }
+
+
+static void start_manager_loop(int sfd)
+{
+	for (;;) {
+		int cfd;
+		char buffer[MAX_CMD_LEN];
+
+		cfd = manager_accept(sfd);
+		if (cfd < 0)
+			die("Error while trying to accept sock connection.");
+
+		memset(buffer, 0, sizeof(buffer));
+		/*
+		 * It's /techinically/ not really an error if read returns 0,
+		 * but if we did get 0 that means that the socket connection
+		 * was closed.
+		 *
+		 * Thus, if the connection was closed and we were expecting to
+		 * read some command we will just treat it as an error.
+		 */
+		if (read(cfd, buffer, sizeof(buffer) - 1) <= 0)
+			log_err("Error while reading from sock connection.");
+		switch (manager_process_input(buffer)) {
+		case CMD_SHUTDOWN:
+			close(cfd);
+			goto done;
+		case CMD_NONE:
+		default:
+			break;
+		}
+
+		if (close(cfd) < 0)
+			log_err("Error attempting to close sock connection.");
+	}
+done:
+	shutdown_manager(sfd);
+	NOTREACHED();
+}
+
 
 int main(int argc, char **argv)
 {
-	char *arg;
+	int opt, sfd, should_init_bot = 0, should_init_server = 0;
+	const char *self_name = argv[0];
 
 	if (argc == 1)
-		return 0;
-	while ((arg = argv[1]) != NULL) {
-		if (*arg != '-')
+		usage(self_name);
+
+	while ((opt = getopt(argc, argv, "abs:S:w")) != -1) {
+		switch (opt) {
+		case 'a':
+			should_init_server = 1;
+			should_init_bot = 1;
 			break;
-		for (;;) {
-			switch (*++arg) {
-			case 'c':
-			case 'C':
-				return init_manager();
-			case 'r':
-			case 'R':
-				return restart_manager();
-			case 0:
-			default:
-				break;
-			}
+		case 'b':
+			should_init_bot = 1;
+			break;
+		case 's':
+		case 'S':
+			if (sanitize_command(optarg))
+				usage(self_name);
+			send_command(optarg);
+			return 0;
+		case 'w':
+			should_init_server = 1;
+			break;
+		case '?':
+		default:
+			usage(self_name);
 			break;
 		}
-		argv++;
 	}
-	return send_command(argv[1]);
+
+	sfd = init_manager();
+
+	/*
+	 * When we are here we are daemonized and ready to start spinning up
+	 * bots and servers and such.
+	 */
+
+	if (setup_child_death_handler() < 0)
+		die("Error setting up child death handler.");
+	if (should_init_bot && init_bot())
+		return 1;
+	if (should_init_server && init_server())
+		return 1;
+
+	start_manager_loop(sfd);
+	return 0;
 }
