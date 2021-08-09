@@ -6,7 +6,7 @@
  * recover a crashed process.
  *
  * When spawed, it daemonizes itself and creates a socket in order to
- * receieve commandsla
+ * receieve commands.
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -26,13 +26,17 @@
 #define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
 #define WEBSERVER_PATH "./tswebserver"
 #define BOT_PATH "./bot.py"
-#define MAX_CMD_LEN 4096
-#define LOG_BUF_SIZE (1 << 18)
 
+#define MAX_CMD_LEN 4096
+#define LOG_BUF_SIZE (1 << 13)
+
+#define die(s, ...) __die("[FATAL] " s, ## __VA_ARGS__)
+#define log_info(s, ...) __loginfo("[INFO] " s, ## __VA_ARGS__)
+#define log_err(s, ...) __log_err("[ERR] " s, ## __VA_ARGS__)
 #define NOTREACHED() \
-	do {							\
-		die("Not reached area reached in %s : %d",	\
-				__func__, __LINE__);		\
+	do {								\
+		die("Not reached denoted line reached in %s : %d",	\
+				__func__, __LINE__);			\
 	} while (0)
 
 #ifndef SUN_LEN
@@ -40,20 +44,26 @@
 	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
 #endif
 
-/*
- * Commented out for now bc idk the direction i wanna go
-struct module_info {
+struct module {
+	char *pathname;
+	char *argv[5];
 	int pipefds[2];
-	int pid;
+	pid_t pid;
 };
 
-static struct module_info ts_bot = {
+static struct module ts_bot = {
+	.pathname = BOT_PATH,
+	.argv = {"python", BOT_PATH, NULL},
 	.pid = -1,
-}
-*/
+};
 
-static int bot_pid = -1;
-static int server_pid = -1;
+static struct module ts_webserver = {
+	.pathname = WEBSERVER_PATH,
+	.argv = {WEBSERVER_PATH, NULL},
+	.pid = -1,
+
+};
+
 static char __log_buf[LOG_BUF_SIZE];
 
 static void usage(const char *self)
@@ -63,48 +73,40 @@ static void usage(const char *self)
 		"  -s    Send a command to the currently running manager\n"
 		"  -a    Start the manager with all modules\n"
 		"  -b    Start the manager with only the bot\n"
-		"  -w    Start the manager with only the webserver\n",
-		self);
+		"  -w    Start the manager with only the webserver\n"
+		"\n"
+		"Examples:\n"
+		"  %s -a (Start up the manager)\n"
+		"  %s -s stop (Send the stop command)\n",
+		self, self, self);
 	exit(1);
 }
 
-enum {
+enum log_levels {
 	LOG_INFO,
 	LOG_ERR,
 	LOG_FATAL,
 };
 
-static void do_log(int log_level, const char *fmt, va_list args)
+static void do_log(enum log_levels log_level, const char *fmt, va_list args)
 {
-	size_t nw = 0;
+	size_t nw;
 	char *buffer = __log_buf;
 	int errv = errno;
 
-	switch (log_level) {
-	case LOG_ERR:
-		nw += snprintf(buffer, LOG_BUF_SIZE, "[ERR] ");
-		break;
-	case LOG_FATAL:
-		nw += snprintf(buffer, LOG_BUF_SIZE, "[FATAL] ");
-		break;
-	case LOG_INFO:
-		nw += snprintf(buffer, LOG_BUF_SIZE, "[NORM] ");
-	default:
-		break;
-	}
-	nw += vsnprintf(buffer + nw, LOG_BUF_SIZE - nw, fmt, args);
-	if (log_level == LOG_FATAL)
+	nw = vsnprintf(buffer, LOG_BUF_SIZE, fmt, args);
+	if (log_level == LOG_FATAL && errv)
 		nw += snprintf(buffer + nw, LOG_BUF_SIZE - nw, " - %s",
 							strerror(errv));
 	buffer[nw] = '\n';
-	write(STDERR_FILENO, buffer, nw + 1);
+
+	write(STDOUT_FILENO, buffer, nw + 1);
 }
 
 /* Fatal error. Program execution should no longer continue. */
-static void die(const char *fmt, ...)
+static void __die(const char *fmt, ...)
 {
 	va_list argp;
-
 	va_start(argp, fmt);
 	do_log(LOG_FATAL, fmt, argp);
 	va_end(argp);
@@ -112,7 +114,7 @@ static void die(const char *fmt, ...)
 }
 
 /* Normal level logging */
-static void logit(const char *fmt, ...)
+static void __loginfo(const char *fmt, ...)
 {
 	va_list argp;
 	va_start(argp, fmt);
@@ -123,9 +125,8 @@ static void logit(const char *fmt, ...)
 /*
  * Only purpose of this function is to make the code verbose in saying that
  * "Hey something pretty bad happened, but just write it down and keep going."
- * Also so I do not have to write "\n" every damn time.
  */
-static void log_err(const char *fmt, ...)
+static void __log_err(const char *fmt, ...)
 {
 	va_list argp;
 	va_start(argp, fmt);
@@ -133,20 +134,17 @@ static void log_err(const char *fmt, ...)
 	va_end(argp);
 }
 
-
 static int init_bot(void)
 {
-	char *const bot_argv[] = {"python", BOT_PATH, NULL};
-
-	logit("Attempting to start up bot...");
-	bot_pid = fork();
-	switch (bot_pid) {
+	log_info("Starting up bot...");
+	ts_bot.pid = fork();
+	switch (ts_bot.pid) {
 	case -1:
 		log_err("Error forking while trying to init bot");
 		return -1;
 	case 0:
 		prctl(PR_SET_PDEATHSIG, SIGHUP);
-		execv("/bin/python", bot_argv);
+		execv("/bin/python", ts_bot.argv);
 		log_err("[BOT ERR] - failed to startup bot");
 		_exit(1);
 		break;
@@ -158,11 +156,9 @@ static int init_bot(void)
 
 static int init_server(void)
 {
-	char *const server_argv[] = {WEBSERVER_PATH, NULL};
-
-	logit("Attempting to start up server...");
-	server_pid = fork();
-	switch (server_pid) {
+	log_info("Starting up server...");
+	ts_webserver.pid = fork();
+	switch (ts_webserver.pid) {
 	case -1:
 		log_err("Error forking while trying to init server");
 		return -1;
@@ -171,7 +167,7 @@ static int init_server(void)
 		if (chdir("./webserver") < 0)
 			log_err("Could not change into webserver directory.");
 		else
-			execvp(WEBSERVER_PATH, server_argv);
+			execv(ts_webserver.pathname, ts_webserver.argv);
 		log_err("[SERVER ERR] - failed to startup server");
 		_exit(1);
 		break;
@@ -191,13 +187,16 @@ static void child_death_handler(int signum)
 	pid_t dead_child;
 	int status = 0;
 
-	dead_child = wait(&status);
-	if (bot_pid == dead_child) {
-		logit("%s: Attempting to restart bot that exited with code (%d)",
+	dead_child = waitpid(-1, &status, WNOHANG);
+	if (dead_child < 0)
+		die("Failed to wait for stopped child.");
+
+	if (dead_child == ts_bot.pid) {
+		log_info("%s: Attempting to restart bot that exited with code (%d)",
 							__func__, status);
 		init_bot();
-	} else if (server_pid == dead_child) {
-		logit("%s: Attempting to restart server that exited with code (%d)",
+	} else if (dead_child == ts_webserver.pid) {
+		log_info("%s: Attempting to restart server that exited with code (%d)",
 							__func__, status);
 		init_server();
 	}
@@ -280,6 +279,11 @@ static void send_command(const char *arg)
 {
 	struct sockaddr_un sa;
 	int fd;
+	size_t cmd_len;
+
+	cmd_len = strlen(arg);
+	if (cmd_len > MAX_CMD_LEN)
+		die("%s is longer than the max command length", arg);
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0)
@@ -296,9 +300,7 @@ static void send_command(const char *arg)
 			die("Error connecting.");
 	}
 
-	if (strlen(arg) > MAX_CMD_LEN)
-		die("%s is longer than the max command length", arg);
-	if (write(fd, arg, strlen(arg)) != strlen(arg))
+	if (write(fd, arg, cmd_len) != cmd_len)
 		die("Error writing to socket.");
 	if (close(fd) < 0)
 		die("Error closing socket fd");
@@ -337,18 +339,18 @@ static void shutdown_manager(int sfd)
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
 		log_err("Error reseting child death handler.");
 
-	if (bot_pid > 0) {
-		if (kill_pid(bot_pid) < 0)
-			log_err("Error killing bot - pid: %d", bot_pid);
+	if (ts_bot.pid > 0) {
+		if (kill_pid(ts_bot.pid) < 0)
+			log_err("Error killing bot - pid: %d", ts_bot.pid);
 		else
-			logit("Bot shutdown complete.");
+			log_info("Bot shutdown complete.");
 	}
 
-	if (server_pid > 0) {
-		if (kill_pid(server_pid) < 0)
-			log_err("Error killing server - pid: %d", server_pid);
+	if (ts_webserver.pid > 0) {
+		if (kill_pid(ts_webserver.pid) < 0)
+			log_err("Error killing server - pid: %d", ts_webserver.pid);
 		else
-			logit("Server shutdown complete.");
+			log_info("Server shutdown complete.");
 	}
 	if (remove(MANAGER_SOCK_PATH) < 0)
 		log_err("Error removing sock from fs");
@@ -416,8 +418,10 @@ static void start_manager_loop(int sfd)
 		char buffer[MAX_CMD_LEN];
 
 		cfd = manager_accept(sfd);
-		if (cfd < 0)
-			die("Error while trying to accept sock connection.");
+		if (cfd < 0) {
+			log_err("Error while trying to accept sock connection.");
+			continue;
+		}
 
 		memset(buffer, 0, sizeof(buffer));
 		/*
@@ -428,8 +432,10 @@ static void start_manager_loop(int sfd)
 		 * Thus, if the connection was closed and we were expecting to
 		 * read some command we will just treat it as an error.
 		 */
-		if (read(cfd, buffer, sizeof(buffer) - 1) <= 0)
+		if (read(cfd, buffer, sizeof(buffer) - 1) <= 0) {
 			log_err("Error while reading from sock connection.");
+			continue;
+		}
 		switch (manager_process_input(buffer)) {
 		case CMD_SHUTDOWN:
 			close(cfd);
@@ -446,7 +452,6 @@ done:
 	shutdown_manager(sfd);
 	NOTREACHED();
 }
-
 
 int main(int argc, char **argv)
 {
