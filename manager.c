@@ -18,6 +18,7 @@
 #include <string.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -43,6 +44,10 @@
 # define SUN_LEN(su) \
 	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
 #endif
+
+struct {
+	int listen_sock;
+} manager;
 
 struct module {
 	char *pathname;
@@ -187,7 +192,9 @@ static void child_death_handler(int signum)
 	pid_t dead_child;
 	int status = 0;
 
-	dead_child = waitpid(-1, &status, WNOHANG);
+	do {
+		dead_child = waitpid(-1, &status, WNOHANG);
+	} while (dead_child < 0 && errno == EINTR);
 	if (dead_child < 0)
 		die("Failed to wait for stopped child.");
 
@@ -202,17 +209,9 @@ static void child_death_handler(int signum)
 	}
 }
 
-static inline int setup_child_death_handler(void)
-{
-	struct sigaction act = {
-		.sa_handler = child_death_handler
-	};
-
-	return sigaction(SIGCHLD, &act, NULL);
-}
 
 /* Make sure that the commands we are going to send are correct */
-static int sanitize_command(const char *cmd)
+static inline int sanitize_command(const char *cmd)
 {
 	return strcmp(cmd, "stop");
 }
@@ -244,24 +243,20 @@ static void init_manager_log_file(void)
 static int setup_comm_socket(void)
 {
 	struct sockaddr_un sa;
-	int sfd;
+	int sfd, on = 1;
 
 	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sfd < 0)
 		die("Error creating socket file descriptor");
+	if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
+		die("Error setting SO_REUSEADDR failed for setsockopt");
 
 	sa.sun_family = AF_LOCAL;
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
 	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
-retry:
-	if (bind(sfd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0) {
-		if (errno == EADDRINUSE) {
-			remove(MANAGER_SOCK_PATH);
-			goto retry;
-		} else
-			die("Error while attempting to bind");
-	}
+	if (bind(sfd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
+		die("Error while attempting to bind");
 	if (listen(sfd, 1) < 0)
 		die("Error setting up socket to listen.");
 	return sfd;
@@ -269,17 +264,26 @@ retry:
 
 static int init_manager(void)
 {
+	struct stat st;
+
+	if (!stat(MANAGER_SOCK_PATH, &st))
+		die("Manager already running.");
 	init_manager_log_file();
 	if (daemon(1, 1) < 0)
 		die("Error daemonizing");
-	return setup_comm_socket();
+	manager.listen_sock = setup_comm_socket();
+	return 0;
 }
 
 static void send_command(const char *arg)
 {
 	struct sockaddr_un sa;
+	struct stat st;
 	int fd;
 	size_t cmd_len;
+
+	if (stat(MANAGER_SOCK_PATH, &st) < 0)
+		die("Manager not currently running");
 
 	cmd_len = strlen(arg);
 	if (cmd_len > MAX_CMD_LEN)
@@ -293,13 +297,8 @@ static void send_command(const char *arg)
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
 	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
-	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0) {
-		if (errno == ENOENT)
-			die("Manager not currently running.");
-		else
-			die("Error connecting.");
-	}
-
+	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
+		die("Error connecting: Ensure that the manager is currently running");
 	if (write(fd, arg, cmd_len) != cmd_len)
 		die("Error writing to socket.");
 	if (close(fd) < 0)
@@ -329,7 +328,7 @@ static int kill_pid(int pid)
  * 	2. Remove socket
  * 	3. exit()
  */
-static void shutdown_manager(int sfd)
+static void shutdown_manager(void)
 {
 	struct sigaction act = {
 		.sa_handler = SIG_DFL
@@ -352,10 +351,31 @@ static void shutdown_manager(int sfd)
 		else
 			log_info("Server shutdown complete.");
 	}
-	if (remove(MANAGER_SOCK_PATH) < 0)
-		log_err("Error removing sock from fs");
-	close(sfd);
+	if (close(manager.listen_sock) < 0)
+		log_err("Error closing manager listen socket");
+	if (unlink(MANAGER_SOCK_PATH) < 0)
+		log_err("Error removing manager socket from fs");
+	log_info("Manager shutdown complete.");
 	exit(0);
+}
+
+static void term_handler(int sign)
+{
+	shutdown_manager();
+}
+
+static int setup_sig_handlers(void)
+{
+	struct sigaction act;
+
+	act.sa_handler = child_death_handler;
+	if (sigaction(SIGCHLD, &act, NULL) < 0)
+		return -1;
+
+	act.sa_handler = term_handler;
+	if (sigaction(SIGTERM, &act, NULL) < 0)
+		return -1;
+	return 0;
 }
 
 /* New manager commands should be added to this enum */
@@ -378,11 +398,11 @@ static enum manager_cmds manager_process_input(const char *input)
  * call to accept, it will return an error of EINTR. Thus, if accept does return
  * this error, we should not be worried and instead just recall it.
  */
-static inline int manager_accept(int sfd)
+static inline int manager_accept(void)
 {
 	int cfd;
 	do {
-		cfd = accept(sfd, NULL, NULL);
+		cfd = accept(manager.listen_sock, NULL, NULL);
 	} while (errno == EINTR);
 	return cfd;
 }
@@ -411,13 +431,13 @@ static inline int manager_accept(int sfd)
  *  to make sure that system calls being made handle EINTR - see errno(3).
  *  For a concrete example of what I mean, see manager_accept.
  */
-static void start_manager_loop(int sfd)
+static void start_manager_loop(void)
 {
 	for (;;) {
 		int cfd;
 		char buffer[MAX_CMD_LEN];
 
-		cfd = manager_accept(sfd);
+		cfd = manager_accept();
 		if (cfd < 0) {
 			log_err("Error while trying to accept sock connection.");
 			continue;
@@ -438,8 +458,8 @@ static void start_manager_loop(int sfd)
 		}
 		switch (manager_process_input(buffer)) {
 		case CMD_SHUTDOWN:
-			close(cfd);
 			goto done;
+			break;
 		case CMD_NONE:
 		default:
 			break;
@@ -449,13 +469,13 @@ static void start_manager_loop(int sfd)
 			log_err("Error attempting to close sock connection.");
 	}
 done:
-	shutdown_manager(sfd);
+	shutdown_manager();
 	NOTREACHED();
 }
 
 int main(int argc, char **argv)
 {
-	int opt, sfd, should_init_bot = 0, should_init_server = 0;
+	int opt, should_init_bot = 0, should_init_server = 0;
 	const char *self_name = argv[0];
 
 	if (argc == 1)
@@ -490,20 +510,20 @@ int main(int argc, char **argv)
 	if (*argv)
 		usage(self_name);
 
-	sfd = init_manager();
+	init_manager();
 
 	/*
 	 * When we are here we are daemonized and ready to start spinning up
 	 * bots and servers and such.
 	 */
 
-	if (setup_child_death_handler() < 0)
-		die("Error setting up child death handler.");
+	if (setup_sig_handlers() < 0)
+		die("Error setting up signal handlers.");
 	if (should_init_bot && init_bot())
 		return 1;
 	if (should_init_server && init_server())
 		return 1;
 
-	start_manager_loop(sfd);
+	start_manager_loop();
 	return 0;
 }
