@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"io/ioutil"
 	"log"
 	"strconv"
@@ -75,4 +76,13 @@ func InitServerFileMap() error {
 		}
 	}
 	return nil
+}
+
+func LookupFile(fileName string) (string, error) {
+	parentDir, ok := ServerFiles[fileName]
+	if !ok {
+		return "", errors.New("No file found")
+	}
+
+	return parentDir.ChannelFilePath + fileName, nil
 }

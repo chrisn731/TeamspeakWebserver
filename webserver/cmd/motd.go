@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	motdPath = "./static/teamspeaksayings.txt"
+	motdPath = "./teamspeaksayings.txt"
 )
 
 var motds []string

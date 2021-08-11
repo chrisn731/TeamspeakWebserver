@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 	"tswebserver/cmd/clienttime"
 	"tswebserver/cmd/tsc"
@@ -53,6 +54,29 @@ var upgrader = websocket.Upgrader{
 var clients = make(map[*websocket.Conn]bool)
 var broadcast = make(chan ClientChatMessage)
 var tsconn *tsc.TSConn = nil
+
+
+// 8/10/2021
+// Dear Jason,
+// Not really sure what you want here yet but I hope this is a start
+// takes the requested file from the path and then looks up the filename.
+// What is returned is simply a path to the file. http.ServeFile() takes care
+// of the rest.
+//
+// Love,
+// 	C N <3
+func fileDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	reqFile := r.URL.Path
+
+	filePath, err := LookupFile(reqFile)
+	if err != nil {
+		return
+	}
+
+	w.Header().Set("Content-Disposition", "attachment; filename="+strconv.Quote(reqFile))
+	w.Header().Set("Content-Type", r.Header.Get("Content-Type"))
+	http.ServeFile(w, r, filePath)
+}
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
 	req := "." + r.URL.Path

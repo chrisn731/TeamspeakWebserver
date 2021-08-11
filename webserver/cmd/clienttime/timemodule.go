@@ -21,7 +21,7 @@ type ClientTimeEntry struct {
 func fetchClientTime() string {
 	var stdout bytes.Buffer
 
-	cmd := exec.Command(ltcExe, "-h", "10", "-s", logsDir)
+	cmd := exec.Command(ltcExe, "-h", "13", "-s", logsDir)
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
