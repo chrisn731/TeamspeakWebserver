@@ -18,7 +18,6 @@
 #define MAX_LINE_SIZE	4096
 #define MAX_CLIENT_NAME	128
 #define MAX_FILE_PATH	512
-#define DEFAULT_TABLE_LEN 512
 
 #define __hot __attribute__((__hot__))
 #define sizeof_field(type, member) (sizeof(((type *) 0)->member))
@@ -319,9 +318,7 @@ static void process_data(const char *buf)
 	if (!strptime(buf, "%Y-%m-%d %H:%M:%S", &tm))
 		return;
 	time = mktime(&tm);
-	if (time == (time_t) -1)
-		return;
-	if (time < time_constraint)
+	if (time == -1 || time < time_constraint)
 		return;
 	if (parse_line(buf, client_name, action, &id))
 		return;
@@ -421,30 +418,31 @@ static void compile_logs(const char *dir)
 {
 	DIR *dp;
 	struct dirent *de;
-	size_t dir_len;
+	size_t dir_len, remaining_bytes;
+	char file_path[MAX_FILE_PATH];
 
 	dp = opendir(dir);
 	if (!dp)
 		die("Failed to open directory '%s'", dir);
-	dir_len = strlen(dir);
+
+	dir_len = snprintf(file_path, MAX_FILE_PATH, "%s%s",
+			dir, dir[strlen(dir) - 1] == '/' ? "" : "/");
+	remaining_bytes = MAX_FILE_PATH - dir_len;
 
 	while ((de = readdir(dp)) != NULL) {
-		char file_path[MAX_FILE_PATH];
-		size_t file_len;
-
 		/*
 		 * Only files ending in _1.log have actual meaningful data to
 		 * parse.
 		 */
 		if (!strstr(de->d_name, "_1.log"))
 			continue;
-		file_len = strlen(de->d_name);
-		if (file_len + dir_len > sizeof(file_path))
-			die("The file path %s%s is too large.", dir, de->d_name);
-		strncpy(file_path, dir, dir_len + 1);
-		strncat(file_path, de->d_name, sizeof(file_path) - dir_len - 1);
-		if (de->d_type == DT_REG)
+		if (de->d_type == DT_REG) {
+			if (strlen(de->d_name) >= remaining_bytes)
+				die("The file path %s%s is too large.",
+							file_path, de->d_name);
+			strcpy(file_path + dir_len, de->d_name);
 			add_to_file_list(file_path, de->d_name);
+		}
 	}
 	if (closedir(dp))
 		die("Error closing %s", dir);
@@ -473,12 +471,10 @@ static void parse_file_list(void)
 		FILE *fp;
 
 		fp = fopen(lf->name, "r");
-		if (!fp) {
-			fprintf(stderr, "Error fopen on %s\n", lf->name);
-			continue;
-		}
+		if (!fp)
+			die("Error opening '%s'", lf->name);
 		if (parse_file(fp) || !feof(fp))
-			die("Failed to parse '%s'", lf->name);
+			die("Failed to fully parse '%s'", lf->name);
 		reset_clients();
 		if (fclose(fp))
 			fprintf(stderr, "Error closing %s\n", lf->name);
@@ -553,22 +549,7 @@ int main(int argc, char **argv)
 	if (!*argv)
 		die_usage(prog_name);
 
-	/*
-	 * Need to make sure the directory we want to parse ends in
-	 * a '/' so that when we create path names it doesnt get screwed
-	 * up.
-	 */
-	log_dir = *argv;
-	ld_len = strlen(log_dir);
-	dir_path = calloc(sizeof(*dir_path), ld_len + 2);
-	if (!dir_path)
-		die("Memory alloc error.");
-	memcpy(dir_path, log_dir, ld_len + 1);
-	if (log_dir[ld_len - 1] != '/')
-		dir_path[ld_len] = '/';
-	compile_logs(dir_path);
-	free(dir_path);
-
+	compile_logs(*argv);
 	parse_file_list();
 	list_sort(&client_list, &list_cmp);
 	print_client_list();
