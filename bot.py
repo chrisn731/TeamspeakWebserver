@@ -10,12 +10,14 @@ import os
 import subprocess
 import sqlite3
 import random
+from fuzzywuzzy import fuzz
+from fuzzywuzzy import process
 
 SID = 1
 # Must be edited to suit your workstation.
-URI = "telnet://serveradmin:IUy8lW5R@localhost:10011"
-FILE_DIR = "C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\teamspeak3-server_win64\\files\\virtualserver_1\\"
-SAYINGS_DIR = "C:\\Users\\jyuen\\Desktop\\Goods\\Programming\\python\\TS_Bot\\sayings\\"
+URI = ""
+FILE_DIR = ""
+SAYINGS_DIR = "./sayings/"
 
 # Teamspeak Connection Class
 # A nice wrapper around some of the commonly used commands to stop from
@@ -25,6 +27,10 @@ class tsc:
     def __init__(self, ts3conn):
         self.ts3conn = ts3conn
         self.ts3conn.exec_("use", sid=SID)
+
+        # Channel id to channel name map.
+        # Should ONLY be accessed using translate_cid_to_name()
+        self.cid_to_name_map = {}
 
     def listen_to_global_chat(self):
         return self.ts3conn.exec_("servernotifyregister", event="textserver")
@@ -44,6 +50,16 @@ class tsc:
     def send_keepalive(self):
         self.ts3conn.send_keepalive()
 
+    def build_cid_to_name_map(self):
+        channel_list = self.get_channellist()
+        for chan in channel_list:
+            self.cid_to_name_map[chan["cid"]] = chan["channel_name"]
+
+    def translate_cid_to_name(self, cid):
+        if len(self.cid_to_name_map) == 0:
+            self.build_cid_to_name_map()
+        return self.cid_to_name_map[cid]
+
 
 sayings = {}
 tsconn = None
@@ -57,33 +73,44 @@ for (dirpath, dirnames, filenames) in os.walk(SAYINGS_DIR):
                 sayings_list.append(line)
             sayings[person] = sayings_list
 
-def file_finder(item):
-    # Create a found files
-    Directory = ""
-    Found = []
-    for (dirpath, dirnames, filenames) in os.walk(FILE_DIR):
-        for filename in filenames:
-            if item in filename:
-                Found.append(filename)
-                Directory = dirpath
+def ff_iterate_files(topdir, to_find):
+    possible_files = []
+    for (top, dirs, fns) in os.walk(FILE_DIR + topdir):
+        token_ratio_tup = process.extract(to_find, fns)
+        for tr in token_ratio_tup:
+            token = tr[0]
+            ratio = tr[1]
+            if (ratio > 70):
+                possible_files.append(token)
 
-    tokens = Directory.split("_")
+    if len(possible_files) != 0:
+        return {"channel_name": topdir, "files": possible_files}
+    else:
+        return None
 
-    # If you find more than one file
-    if len(Found) != 1:
-        # Return null if no files found
-        if(len(Found) == 0):
-            return 0
-        # Don't want to overload the chat with files so just return a too many results error
-        elif len(Found) > 3:
-            return 4
-        # if files found is 2 or 3 return the files found to be more specific
-        else:
-            tsconn.global_msg("I found some files of similar name:")
-            for files in Found:
-                tsconn.global_msg("{}".format(files))
+def start_file_finder(data):
+    invoker = data["user"]
+    file_to_find = data["file"]
 
-    return tokens[len(tokens) - 1]
+    possible_files = []
+    for (dirpath, dirs, filenames) in os.walk(FILE_DIR):
+        for dirp in dirs:
+            # "internal" is a folder that holds no useful information
+            if dirp == "internal":
+                continue
+            rv = ff_iterate_files(dirp, file_to_find)
+            if rv:
+                possible_files.append(rv)
+
+    tsconn.global_msg("[B][COLOR=#C02F1D]##### POSSIBLE FILES #####[/COLOR][/B]")
+    for d in possible_files:
+        real_channelname = tsconn.translate_cid_to_name(d["channel_name"][8:])
+        tsconn.global_msg("[COLOR=#1287A8]{}[/COLOR]".format(real_channelname))
+
+        for file in d["files"]:
+            tsconn.global_msg("\t[COLOR=#DA621E]{}[/COLOR]".format(file))
+
+    tsconn.global_msg("[B][COLOR=#C02F1D]##### END OF FILE LIST #####[/COLOR][/B]")
 
 def say(person):
     lines = sayings.get(person, 0)
@@ -174,34 +201,6 @@ def countdown(data):
 
     output = "{user}'s Timer Is Up"
     tsconn.global_msg(output.format(user=user))
-
-
-def start_file_finder(data):
-    # Find the ID of the channel so we know where to look in the database
-    file_to_find = data["file"]
-    user = data["user"]
-    channelid = file_finder(ts3conn, tokenized[1])
-
-    # ChannelID > 0, so if < 0 the file wont exit
-    if channelid == 0:
-        tsconn.global_msg("I'm sorry, {}, but that file does not seem \
-                        to exist.".format(user))
-    elif channelid == 4:
-        tsconn.global_msg("I'm sorry, {}, but you need to be more specific.\
-                        Too many results returned".format(user))
-    else:
-        # Connect to the database and look through the channel_properties
-        Channel_Name = database_search(int(channelid))
-        if Channel_Name == "error":
-            tsconn.global_msg("Sorry, {}, There was an issue acccessing \
-                            the server database.".format(user))
-
-        # Do something based on what the user wants
-        elif "!find" in message:
-            tsconn.global_msg("That file seems to be located in: {}".format(Channel_Name))
-        else:
-            pass
-
 
 def do_ltc(data):
     user = data["user"]
