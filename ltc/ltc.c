@@ -94,10 +94,12 @@ static void die(const char *fmt, ...)
 static void die_usage(const char *prog_name)
 {
 	fprintf(stdout,
-		"Usage: %s [-d MM-DD-YYYY] [-s] [-t | -h] log_directory\n"
+		"Usage: %s [-d MM-DD-YYYY] [-s] [-t | -h #] log_directory\n"
 		"Available flags\n"
 		"  -d		Constraint Date MM-DD-YYYY\n"
-		"  -s 		Print time connected in seconds\n",
+		"  -s 		Print time connected in seconds\n"
+		"  -t -h        Print a set number of clients from the\n"
+		"                tail [-t] or head [-h]\n",
 		prog_name);
 	exit(0);
 }
@@ -226,7 +228,11 @@ static int get_name(const char *buf, char *t, int buf_len)
 	if (*buf == '\'')
 		buf++;
 	while (nr++ < buf_len) {
-		/* Only allow ascii characters. */
+		/*
+		 * Teamspeak allows more than ascii for client names.
+		 * This causes log files to have name strings as '&#95564&#865'.
+		 * I want to keep this simple. So, only allow ascii characters.
+		 */
 		if (*buf > 0) {
 			if (*buf == '\'' && buf[1] == '(')
 				break;
@@ -252,6 +258,24 @@ static void get_id(const char *buf, char *t, int buf_len)
 }
 
 #define ACTION_LEN 20
+/* parse_line - parse words within the line looking for some keywords
+ *
+ * This is basically a long winded process to just parse
+ * a single line of the teamspeak log. I don't wanna use sscanf
+ * because:
+ * 	(a) sscanf just has a bad history of doing evil things,
+ * 		such as becoming exponential (GTA)
+ * 	(b) sscanf just feels clunky to use with trying to parse a
+ * 		string that is not always laid out the same.
+ *
+ * We need to read the
+ * 	- Time and convert it into seconds since the Unix Epoch.
+ * 	- Other useless information on the line
+ * 	- Client name
+ *
+ * Once the line has been completely read, we can use this information
+ * to update the client list.
+ */
 static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 {
 	char log_type[10] = {0};
@@ -259,7 +283,10 @@ static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 	char first[20] = {0};
 	char id_buf[10] = {0};
 
-	/* Skip past the date shit which is always 26 characters long. */
+	/*
+	 * We already parsed the datetime from the calling function. Thus we
+	 * can skip that information. The datetime is *always* 26 characters.
+	 */
 	buf += 26;
 	buf += get_log_type(buf, log_type);
 
@@ -289,7 +316,14 @@ static int parse_line(const char *buf, char *name_buf, char *action, int *id)
 	return 0;
 }
 
-static void process_data(const char *buf)
+/*
+ * process_line - process a single line of a file
+ *
+ * The purpose of this function is to act on whatever parse_line returned. If
+ * we found all relevant information from parse_line, we can follow up and start
+ * marking clients as connected or disconnected. Otherwise, we can skip the line.
+ */
+static void process_line(const char *buf)
 {
 	struct tm tm = {0};
 	time_t time;
@@ -297,29 +331,13 @@ static void process_data(const char *buf)
 	char action[ACTION_LEN] = {0};
 	int id;
 
-	/*
-	 * This is basically a long winded process to just parse
-	 * a single line of the teamspeak log. I don't wanna use sscanf
-	 * because:
-	 * 	(a) sscanf just has a bad history of doing evil things,
-	 * 		such as becoming exponential (GTA)
-	 * 	(b) sscanf just feels clunky to use with trying to parse a
-	 * 		string that is not always laid out the same.
-	 *
-	 * We need to read the
-	 * 	- Time and convert it into seconds since the Unix Epoch.
-	 * 	- Other useless information on the line
-	 * 	- Client name
-	 * Once the line has been completely read, we can use this information
-	 * to update the client list.
-	 */
-
-	/* First grab the time of the log time */
+	/* First grab the time the line was written */
 	if (!strptime(buf, "%Y-%m-%d %H:%M:%S", &tm))
 		return;
 	time = mktime(&tm);
 	if (time == -1 || time < time_constraint)
 		return;
+	/* Fetch the important information */
 	if (parse_line(buf, client_name, action, &id))
 		return;
 
@@ -331,7 +349,14 @@ static void process_data(const char *buf)
 		fprintf(stderr, "WARN - action come up as: %s\n", action);
 }
 
-
+/*
+ * parse_file - begin parsing each line of a given file
+ *
+ * Reads a file, line by line, and hands off the buffer to process_line()
+ *
+ * If the line is too long to fit into the buffer, it prints the line it was
+ * unable to parse and exits.
+ */
 static int parse_file(FILE *fp)
 {
 	char buf[MAX_LINE_SIZE];
@@ -340,7 +365,7 @@ static int parse_file(FILE *fp)
 		if (!memchr(buf, '\n', MAX_LINE_SIZE))
 			die("Line that starts with %.*s is too long to parse",
 					MAX_LINE_SIZE - 1, buf);
-		process_data(buf);
+		process_line(buf);
 	}
 	return feof(fp) ? 0 : 1;
 
@@ -390,6 +415,12 @@ static void print_client_list(void)
 	}
 }
 
+/* add_to_file_list - add's a log file to log list
+ *
+ * Adds a file to the log list. The name of each file should have the datetime
+ * of when it was created. This allows us to make sure to leave out log files
+ * if they are outside the 'date constraint' given by commmand line args.
+ */
 static void add_to_file_list(const char *full_path, const char *fn)
 {
 	struct log_file *l, *new;
@@ -414,6 +445,11 @@ static void add_to_file_list(const char *full_path, const char *fn)
 	list_add_prev(&new->list, &l->list);
 }
 
+/*
+ * compile_logs - traverse log directory and create file list
+ *
+ * Traverses log directory and for each valid log file calls add_to_file_list()
+ */
 static void compile_logs(const char *dir)
 {
 	DIR *dp;

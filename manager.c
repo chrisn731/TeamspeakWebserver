@@ -45,15 +45,37 @@
 	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
 #endif
 
-struct {
+/*
+ * manager struct
+ *
+ * Keeps track of the state of the running manager.
+ */
+static struct {
+	/* listen_sock - file descriptor for it's listening socket */
 	int listen_sock;
+
+	/*
+	 * running - is the manager currently running. 0 or 1 only
+	 * Marked as volatile because the value can be changed by the SIGTERM
+	 * signal handler.
+	 */
+	volatile unsigned int running;
 } manager;
 
 struct module {
+	/* pathname & argv - args to be used for exec() calls */
 	char *pathname;
 	char *argv[5];
-	int pipefds[2];
 	pid_t pid;
+
+	/*
+	 * num_*_fails - keeps track of how many times a module has failed
+	 * If the number of fails for a module is >= MAX_FAIL_FOR_STOP the
+	 * module is NOT reloaded if it is terminated.
+	 * Marked as volatile because edited while in SIGCHLD signal handler.
+	 */
+#define MAX_FAIL_FOR_STOP 5
+	volatile unsigned int num_fails;
 };
 
 static struct module ts_bot = {
@@ -192,17 +214,26 @@ static void child_death_handler(int signum)
 	pid_t dead_child;
 	int status = 0;
 
-	do {
-		dead_child = waitpid(-1, &status, WNOHANG);
-	} while (dead_child < 0 && errno == EINTR);
+	(void) signum;
+	dead_child = waitpid(-1, &status, WNOHANG);
 	if (dead_child < 0)
 		die("Failed to wait for stopped child.");
 
 	if (dead_child == ts_bot.pid) {
+		if (++ts_bot.num_fails == MAX_FAIL_FOR_STOP) {
+			log_err("Bot failed too many times. Leaving off.");
+			ts_bot.pid = -1;
+			return;
+		}
 		log_info("%s: Attempting to restart bot that exited with code (%d)",
 							__func__, status);
 		init_bot();
 	} else if (dead_child == ts_webserver.pid) {
+		if (++ts_webserver.num_fails == MAX_FAIL_FOR_STOP) {
+			log_err("TS Webserver failed too many times. Leaving off.");
+			ts_webserver.pid = -1;
+			return;
+		}
 		log_info("%s: Attempting to restart server that exited with code (%d)",
 							__func__, status);
 		init_server();
@@ -262,7 +293,7 @@ static int setup_comm_socket(void)
 	return sfd;
 }
 
-static int init_manager(void)
+static void init_manager(void)
 {
 	struct stat st;
 
@@ -272,9 +303,12 @@ static int init_manager(void)
 	if (daemon(1, 1) < 0)
 		die("Error daemonizing");
 	manager.listen_sock = setup_comm_socket();
-	return 0;
+	manager.running = 1;
 }
 
+/*
+ * send_command - send a command to the daemonized manager
+ */
 static void send_command(const char *arg)
 {
 	struct sockaddr_un sa;
@@ -361,17 +395,33 @@ static void shutdown_manager(void)
 
 static void term_handler(int sign)
 {
-	shutdown_manager();
+	(void) sign;
+	manager.running = 0;
 }
 
+/*
+ * There are two main handlers to set up here.
+ * 	1. Child death
+ * 		- If a child dies we are going to want to try and recover their
+ * 		    return status. Also attempt to restart them.
+ * 	2. Termination Signal
+ * 		- This signal means that the manager should stop. If the manager
+ * 		    is stopping, then all the processes it is managing should
+ * 		    also stop.
+ */
 static int setup_sig_handlers(void)
 {
 	struct sigaction act;
+	sigset_t to_ignore;
 
+	memset(&act, 0, sizeof(act));
+	sigaddset(&to_ignore, SIGCHLD);
 	act.sa_handler = child_death_handler;
+	act.sa_mask = to_ignore;
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
 		return -1;
 
+	memset(&act, 0, sizeof(act));
 	act.sa_handler = term_handler;
 	if (sigaction(SIGTERM, &act, NULL) < 0)
 		return -1;
@@ -392,26 +442,10 @@ static enum manager_cmds manager_process_input(const char *input)
 }
 
 /*
- * The importance of this function lies in the fact that the manager _should_
- * be stuck at accept until something happens (child death/connection).
- * The important thing to note is the child death. If a child dies during a
- * call to accept, it will return an error of EINTR. Thus, if accept does return
- * this error, we should not be worried and instead just recall it.
- */
-static inline int manager_accept(void)
-{
-	int cfd;
-	do {
-		cfd = accept(manager.listen_sock, NULL, NULL);
-	} while (errno == EINTR);
-	return cfd;
-}
-
-/*
  * Main manager loop.
  *
  * At this point we have:
- * 	+ Loaded all requested modules (bot, server) requested.
+ * 	+ Loaded all requested modules (bot/server)
  * 	+ Initalized the log file
  * 	+ Daemonized
  * 	+ Have a working local Unix socket for IPC and receiving commands
@@ -433,17 +467,17 @@ static inline int manager_accept(void)
  */
 static void start_manager_loop(void)
 {
-	for (;;) {
-		int cfd;
+	while (manager.running) {
+		int cfd, nr;
 		char buffer[MAX_CMD_LEN];
 
-		cfd = manager_accept();
+		cfd = accept(manager.listen_sock, NULL, NULL);
 		if (cfd < 0) {
-			log_err("Error while trying to accept sock connection.");
+			if (errno != EINTR)
+				log_err("Error while trying to accept sock connection.");
 			continue;
 		}
 
-		memset(buffer, 0, sizeof(buffer));
 		/*
 		 * It's /techinically/ not really an error if read returns 0,
 		 * but if we did get 0 that means that the socket connection
@@ -452,10 +486,14 @@ static void start_manager_loop(void)
 		 * Thus, if the connection was closed and we were expecting to
 		 * read some command we will just treat it as an error.
 		 */
-		if (read(cfd, buffer, sizeof(buffer) - 1) <= 0) {
+		nr = read(cfd, buffer, sizeof(buffer) - 1);
+		if (nr <= 0) {
 			log_err("Error while reading from sock connection.");
+			close(cfd);
 			continue;
 		}
+		buffer[nr] = '\0';
+
 		switch (manager_process_input(buffer)) {
 		case CMD_SHUTDOWN:
 			goto done;
@@ -516,7 +554,6 @@ int main(int argc, char **argv)
 	 * When we are here we are daemonized and ready to start spinning up
 	 * bots and servers and such.
 	 */
-
 	if (setup_sig_handlers() < 0)
 		die("Error setting up signal handlers.");
 	if (should_init_bot && init_bot())
