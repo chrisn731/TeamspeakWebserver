@@ -60,6 +60,9 @@ class tsc:
             self.build_cid_to_name_map()
         return self.cid_to_name_map[cid]
 
+    def private_msg(self, clid, cmsg):
+        return self.ts3conn.exec_("sendtextmessage", targetmode="1", target=clid, msg=cmsg)
+
 
 sayings = {}
 tsconn = None
@@ -73,6 +76,12 @@ for (dirpath, dirnames, filenames) in os.walk(SAYINGS_DIR):
                 sayings_list.append(line)
             sayings[person] = sayings_list
 
+def create_file_link(file):
+    url_template = "[URL=ts3file://47.16.222.125?port=9987&serverUID=\
+            Wy6XPGok6hgpeooc31NWjg7hzuw%3D&channel={chanid}&path=%2F&\
+            filename={fn}&isDir=0&size={filesize}&fileDateTime={fdt}]\
+            {fn}[/URL]"
+
 def ff_iterate_files(topdir, to_find):
     possible_files = []
     for (top, dirs, fns) in os.walk(FILE_DIR + topdir):
@@ -80,7 +89,7 @@ def ff_iterate_files(topdir, to_find):
         for tr in token_ratio_tup:
             token = tr[0]
             ratio = tr[1]
-            if (ratio > 70):
+            if (ratio >= 60):
                 possible_files.append(token)
 
     if len(possible_files) != 0:
@@ -90,6 +99,7 @@ def ff_iterate_files(topdir, to_find):
 
 def start_file_finder(data):
     invoker = data["user"]
+    invokerid = data["userid"]
     file_to_find = data["file"]
 
     possible_files = []
@@ -102,15 +112,15 @@ def start_file_finder(data):
             if rv:
                 possible_files.append(rv)
 
-    tsconn.global_msg("[B][COLOR=#C02F1D]##### POSSIBLE FILES #####[/COLOR][/B]")
+    tsconn.private_msg(invokerid, "[B][COLOR=#C02F1D]##### POSSIBLE FILES #####[/COLOR][/B]")
     for d in possible_files:
         real_channelname = tsconn.translate_cid_to_name(d["channel_name"][8:])
-        tsconn.global_msg("[COLOR=#1287A8]{}[/COLOR]".format(real_channelname))
+        tsconn.private_msg(invokerid, "[COLOR=#1287A8]{}[/COLOR]".format(real_channelname))
 
         for file in d["files"]:
-            tsconn.global_msg("\t[COLOR=#DA621E]{}[/COLOR]".format(file))
+            tsconn.private_msg(invokerid, "\t[COLOR=#DA621E]{}[/COLOR]".format(file))
 
-    tsconn.global_msg("[B][COLOR=#C02F1D]##### END OF FILE LIST #####[/COLOR][/B]")
+    tsconn.private_msg(invokerid, "[B][COLOR=#C02F1D]##### END OF FILE LIST #####[/COLOR][/B]")
 
 def say(person):
     lines = sayings.get(person, 0)
@@ -163,22 +173,6 @@ def roll_dice(data):
 
     output += " (" + sum_string + ")"
     tsconn.global_msg(output.format(user=user, dice=dice, total=total))
-
-def database_search(channelid):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("SELECT * FROM channel_properties;")
-    channelname = "error"
-
-    rows = c.fetchall()
-    for row in rows:
-        if channelid in row and 'channel_name' in row:
-            channelname = (row[len(row) - 1])
-
-    conn.commit()
-    conn.close()
-    return channelname
-
 
 def countdown(data):
     timer = int(data["time"])
@@ -251,11 +245,15 @@ def start():
 
             # If the first token is the command !find or !get
             if "!find" == command or "!get" == command:
-                data = {
-                    "file": tokenized[1],
-                    "user": event[0]["invokername"]
-                }
-                start_file_finder(data)
+                if len(tokenized) == 2:
+                    data = {
+                        "file": tokenized[1],
+                        "user": event[0]["invokername"],
+                        "userid": event[0]["invokerid"]
+                    }
+                    start_file_finder(data)
+                else:
+                    tsconn.global_msg("Usage: !find [hint]")
 
             elif "!roll" == command:
                 data = {
