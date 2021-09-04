@@ -10,8 +10,8 @@ import (
 const (
 	username = ""
 	password = ""
-	ip       = "192.168.1.34"
-	port     = "10011"
+	ip       = ""
+	port     = ""
 )
 
 type TSConn struct {
@@ -77,6 +77,25 @@ func (c *TSConn) CloseConn() {
 
 func (c *TSConn) buildChannelClientMap() (map[string][]string, error) {
 	methods := ts3.ServerMethods{c.Conn}
+	shouldHide := func(c *ts3.Channel) bool {
+		// If we want to hide some channels from the website, we add
+		// on the channel id's into this array
+		// Currently Blocked Channels:
+		// 	98 = Captain's Quarters
+		hiddenChannels := []int{98}
+		for _, id := range hiddenChannels {
+			if c.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	clientInChannel := func(chnl *ts3.Channel, client *ts3.OnlineClient) bool {
+		// Ensures that we are not looking at the 'serveradmin' that
+		// is querying the server and that the client is in the channel
+		// in question.
+		return client.ID == chnl.ID && client.Type != 1
+	}
 
 	clientList, err := methods.ClientList()
 	if err != nil {
@@ -93,7 +112,7 @@ func (c *TSConn) buildChannelClientMap() (map[string][]string, error) {
 	// TODO: Optimize this: k = num of channels => O(32k)
 	for _, client := range clientList {
 		for _, channel := range channelList {
-			if client.ID == channel.ID && client.Type != 1 {
+			if !shouldHide(channel) && clientInChannel(channel, client) {
 				cName := channel.ChannelName
 				channelClientMap[cName] = append(channelClientMap[cName], client.Nickname)
 			}
