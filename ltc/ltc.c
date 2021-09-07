@@ -187,36 +187,6 @@ static __hot void log_disconn(const char *client_name, int id, time_t t_disconn)
 	}
 }
 
-static int get_log_type(const char *buf, char *t)
-{
-	int nr = 0;
-
-	if (*buf == '|') {
-		buf++;
-		nr++;
-	}
-	while (*buf != '|' && !isspace(*buf)) {
-		nr++;
-		*t++ = *buf++;
-	}
-	while (isspace(*buf++))
-		nr++;
-	return nr;
-}
-
-static int get_word(const char *buf, char *t, int buf_len)
-{
-	int nr = 0;
-
-	while (nr++ < buf_len) {
-		char c = *buf++;
-		if (isspace(c))
-			break;
-		*t++ = c;
-	}
-	return nr;
-}
-
 static int get_name(const char *buf, char *t, int buf_len)
 {
 	int nr = 0;
@@ -257,8 +227,12 @@ static void get_id(const char *buf, char *t, int buf_len)
 
 }
 
-#define ACTION_LEN 20
-/* parse_line - parse words within the line looking for some keywords
+#define NO_ACTION 0x00
+#define CLIENT_CONNECT 0x01
+#define CLIENT_DISCONNECT 0x02
+
+/*
+ * parse_line - parse words within the line looking for some keywords
  *
  * This is basically a long winded process to just parse
  * a single line of the teamspeak log. I don't wanna use sscanf
@@ -276,44 +250,33 @@ static void get_id(const char *buf, char *t, int buf_len)
  * Once the line has been completely read, we can use this information
  * to update the client list.
  */
-static int parse_line(const char *buf, char *name_buf, char *action, int *id)
+static int parse_line(const char *buf, char *name_buf, int *id)
 {
-	char log_type[10] = {0};
-	char log_event[20] = {0};
-	char first[20] = {0};
+	int action = NO_ACTION;
 	char id_buf[10] = {0};
+	char *action_str;
+
+	action_str = strstr(buf, "client connected");
+	if (action_str) {
+		action = CLIENT_CONNECT;
+	} else {
+		action_str = strstr(buf, "client disconnected");
+		if (action_str)
+			action = CLIENT_DISCONNECT;
+		else
+			return NO_ACTION;
+	}
 
 	/*
-	 * We already parsed the datetime from the calling function. Thus we
-	 * can skip that information. The datetime is *always* 26 characters.
+	 * This for loop skips past the 'client (dis)connected' text we just
+	 * found to set us up to call get_name()
 	 */
-	buf += 26;
-	buf += get_log_type(buf, log_type);
-
-	/*
-	 * There are a bunch of other log "events" (idk if that is what they
-	 * are actually called, but I will call them that). Client connections
-	 * and disconnections are _only_ logged under the event
-	 * "VirtualServerBase". So, if we read something other than that we can
-	 * move past that line.
-	 */
-	if (strcmp(log_type, "INFO"))
-		return -1;
-	buf += get_log_type(buf, log_event);
-	if (strcmp(log_event, "VirtualServerBase"))
-		return -1;
-	while (!isalpha(*buf))
-		buf++;
-	buf += get_word(buf, first, sizeof(first));
-	if (strcmp(first, "client"))
-		return -1;
-	buf += get_word(buf, action, ACTION_LEN);
-	if (strcmp(action, "connected") && strcmp(action, "disconnected"))
-		return -1;
+	for (buf = action_str; *buf && *buf != '\''; buf++)
+		;
 	buf += get_name(buf, name_buf, MAX_CLIENT_NAME);
 	get_id(buf, id_buf, sizeof(buf));
 	*id = atoi(id_buf);
-	return 0;
+	return action;
 }
 
 /*
@@ -328,8 +291,7 @@ static void process_line(const char *buf)
 	struct tm tm = {0};
 	time_t time;
 	char client_name[MAX_CLIENT_NAME] = {0};
-	char action[ACTION_LEN] = {0};
-	int id;
+	int id, action;
 
 	/* First grab the time the line was written */
 	if (!strptime(buf, "%Y-%m-%d %H:%M:%S", &tm))
@@ -338,15 +300,21 @@ static void process_line(const char *buf)
 	if (time == -1 || time < time_constraint)
 		return;
 	/* Fetch the important information */
-	if (parse_line(buf, client_name, action, &id))
-		return;
+	action = parse_line(buf, client_name, &id);
 
-	if (!strcmp(action, "connected"))
+	switch (action) {
+	case CLIENT_CONNECT:
 		log_conn(client_name, id, time);
-	else if (!strcmp(action, "disconnected"))
+		break;
+	case CLIENT_DISCONNECT:
 		log_disconn(client_name, id, time);
-	else
-		fprintf(stderr, "WARN - action come up as: %s\n", action);
+		break;
+	case NO_ACTION:
+		break;
+	default:
+		die("bad action");
+		break;
+	}
 }
 
 /*
@@ -415,7 +383,8 @@ static void print_client_list(void)
 	}
 }
 
-/* add_to_file_list - add's a log file to log list
+/*
+ * add_to_file_list - add's a log file to log list
  *
  * Adds a file to the log list. The name of each file should have the datetime
  * of when it was created. This allows us to make sure to leave out log files
