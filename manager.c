@@ -44,6 +44,8 @@
 # define SUN_LEN(su) \
 	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
 #endif
+#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
+#define __noreturn __attribute__((__noreturn__))
 
 /*
  * manager struct
@@ -60,36 +62,48 @@ static struct {
 	 * signal handler.
 	 */
 	volatile unsigned int running;
+	volatile unsigned int mods_need_restart;
 } manager;
 
 struct module {
 	/* pathname & argv - args to be used for exec() calls */
-	char *pathname;
-	char *argv[5];
+	const char *mod_name;
+	const char *pathname;
+	char *const argv[5];
+	void (*init)(void);
 	pid_t pid;
 
 	/*
 	 * num_*_fails - keeps track of how many times a module has failed
 	 * If the number of fails for a module is >= MAX_FAIL_FOR_STOP the
 	 * module is NOT reloaded if it is terminated.
-	 * Marked as volatile because edited while in SIGCHLD signal handler.
 	 */
 #define MAX_FAIL_FOR_STOP 5
-	volatile unsigned int num_fails;
+	unsigned int num_fails;
+	unsigned int needs_restart;
+	int wstatus;
 };
 
+static void init_ts_bot(void);
 static struct module ts_bot = {
+	.mod_name = "ts_bot",
 	.pathname = BOT_PATH,
 	.argv = {"python", BOT_PATH, NULL},
 	.pid = -1,
+	.init = &init_ts_bot,
+	.num_fails = 0,
 };
 
+static void init_ts_webserver(void);
 static struct module ts_webserver = {
+	.mod_name = "ts_webserver",
 	.pathname = WEBSERVER_PATH,
 	.argv = {WEBSERVER_PATH, NULL},
 	.pid = -1,
-
+	.init = &init_ts_webserver,
+	.num_fails = 0,
 };
+static struct module *mods[] = { &ts_bot, &ts_webserver };
 
 static char __log_buf[LOG_BUF_SIZE];
 
@@ -131,7 +145,7 @@ static void do_log(enum log_levels log_level, const char *fmt, va_list args)
 }
 
 /* Fatal error. Program execution should no longer continue. */
-static void __die(const char *fmt, ...)
+static void __noreturn __die(const char *fmt, ...)
 {
 	va_list argp;
 	va_start(argp, fmt);
@@ -161,44 +175,44 @@ static void __log_err(const char *fmt, ...)
 	va_end(argp);
 }
 
-static int init_bot(void)
+static void __noreturn init_ts_bot(void)
 {
-	log_info("Starting up bot...");
-	ts_bot.pid = fork();
-	switch (ts_bot.pid) {
-	case -1:
-		log_err("Error forking while trying to init bot");
-		return -1;
-	case 0:
-		prctl(PR_SET_PDEATHSIG, SIGHUP);
-		execv("/bin/python", ts_bot.argv);
-		log_err("[BOT ERR] - failed to startup bot");
-		_exit(1);
-		break;
-	default:
-		break;
-	}
-	return 0;
+	execv("/bin/python", ts_bot.argv);
+	log_err("[BOT ERR] - failed to startup bot");
+	_exit(1);
 }
 
-static int init_server(void)
+static void __noreturn init_ts_webserver(void)
 {
-	log_info("Starting up server...");
-	ts_webserver.pid = fork();
-	switch (ts_webserver.pid) {
+	if (chdir("./webserver") < 0)
+		log_err("Could not change into webserver directory.");
+	else
+		execv(ts_webserver.pathname, ts_webserver.argv);
+	log_err("[SERVER ERR] - failed to startup server");
+	_exit(1);
+}
+
+/*
+ * do_init_module - fork and attempt to initialize module
+ *
+ * This function calls prctl() (which is linux specific BTW) so that our
+ * initialized module dies off if the manager were to unexpectedly die.
+ */
+static int do_init_module(struct module *mod)
+{
+	int cpid;
+
+	log_info("Attempting to start up '%s'", mod->mod_name);
+	cpid = fork();
+	switch (cpid) {
 	case -1:
-		log_err("Error forking while trying to init server");
+		log_err("Failed to fork for %s", mod->mod_name);
 		return -1;
 	case 0:
 		prctl(PR_SET_PDEATHSIG, SIGHUP);
-		if (chdir("./webserver") < 0)
-			log_err("Could not change into webserver directory.");
-		else
-			execv(ts_webserver.pathname, ts_webserver.argv);
-		log_err("[SERVER ERR] - failed to startup server");
-		_exit(1);
-		break;
+		mod->init(); /* DOES NOT RETURN */
 	default:
+		mod->pid = cpid;
 		break;
 	}
 	return 0;
@@ -212,31 +226,21 @@ static int init_server(void)
 static void child_death_handler(int signum)
 {
 	pid_t dead_child;
-	int status = 0;
+	int i, status = 0;
 
 	(void) signum;
 	dead_child = waitpid(-1, &status, WNOHANG);
 	if (dead_child < 0)
 		die("Failed to wait for stopped child.");
 
-	if (dead_child == ts_bot.pid) {
-		if (++ts_bot.num_fails == MAX_FAIL_FOR_STOP) {
-			log_err("Bot failed too many times. Leaving off.");
-			ts_bot.pid = -1;
+	for (i = 0; i < ARRAY_SIZE(mods); i++) {
+		struct module *mod = mods[i];
+		if (dead_child == mod->pid) {
+			mod->needs_restart = 1;
+			mod->wstatus = status;
+			manager.mods_need_restart = 1;
 			return;
 		}
-		log_info("%s: Attempting to restart bot that exited with code (%d)",
-							__func__, status);
-		init_bot();
-	} else if (dead_child == ts_webserver.pid) {
-		if (++ts_webserver.num_fails == MAX_FAIL_FOR_STOP) {
-			log_err("TS Webserver failed too many times. Leaving off.");
-			ts_webserver.pid = -1;
-			return;
-		}
-		log_info("%s: Attempting to restart server that exited with code (%d)",
-							__func__, status);
-		init_server();
 	}
 }
 
@@ -293,6 +297,9 @@ static int setup_comm_socket(void)
 	return sfd;
 }
 
+/*
+ * init_manager - initalize log file, daemonzie, set up manager running state
+ */
 static void init_manager(void)
 {
 	struct stat st;
@@ -362,7 +369,7 @@ static int kill_pid(int pid)
  * 	2. Remove socket
  * 	3. exit()
  */
-static void shutdown_manager(void)
+static void __noreturn shutdown_manager(void)
 {
 	struct sigaction act = {
 		.sa_handler = SIG_DFL
@@ -428,6 +435,28 @@ static int setup_sig_handlers(void)
 	return 0;
 }
 
+static void restart_mods(void)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(mods); i++) {
+		struct module *m = mods[i];
+		if (m->needs_restart) {
+			log_info("%s has died with code (%d) attempting to restart",
+					m->mod_name, m->wstatus);
+			if (++m->num_fails >= MAX_FAIL_FOR_STOP) {
+				log_err("%s failed too many times. Leaving off",
+						m->mod_name);
+				m->needs_restart = 0;
+				m->pid = -1;
+				continue;
+			}
+			if (!do_init_module(m))
+				m->needs_restart = 0;
+		}
+	}
+}
+
 /* New manager commands should be added to this enum */
 enum manager_cmds {
 	CMD_NONE,
@@ -452,7 +481,9 @@ static enum manager_cmds manager_process_input(const char *input)
  * 	+ Registered a child death signal handler
  *
  * Now enter an infinite loop that starts by calling accept() and waiting
- * for a command or event to come up.
+ * for a command or event to come up. If a child dies, we *temporarily* leave
+ * the main loop to restart any dead modules. After that procedure is finished
+ * we reenable the manager.
  *
  * Important things to remember:
  *  - accept() is BLOCKING therefore as soon as we come into here the manager
@@ -463,11 +494,11 @@ static enum manager_cmds manager_process_input(const char *input)
  *  - We could possbily halt the execution of this loop from an event. More
  *  specifically, if a child process was to die. Therefore it is imperative
  *  to make sure that system calls being made handle EINTR - see errno(3).
- *  For a concrete example of what I mean, see manager_accept.
  */
 static void start_manager_loop(void)
 {
-	while (manager.running) {
+reenable:
+	while (manager.running && !manager.mods_need_restart) {
 		int cfd, nr;
 		char buffer[MAX_CMD_LEN];
 
@@ -505,6 +536,11 @@ static void start_manager_loop(void)
 
 		if (close(cfd) < 0)
 			log_err("Error attempting to close sock connection.");
+	}
+	if (manager.running && manager.mods_need_restart) {
+		restart_mods();
+		manager.mods_need_restart = 0;
+		goto reenable;
 	}
 done:
 	shutdown_manager();
@@ -556,9 +592,9 @@ int main(int argc, char **argv)
 	 */
 	if (setup_sig_handlers() < 0)
 		die("Error setting up signal handlers.");
-	if (should_init_bot && init_bot())
+	if (should_init_bot && do_init_module(&ts_bot))
 		return 1;
-	if (should_init_server && init_server())
+	if (should_init_server && do_init_module(&ts_webserver))
 		return 1;
 
 	start_manager_loop();

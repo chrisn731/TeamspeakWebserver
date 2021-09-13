@@ -4,7 +4,7 @@ CC = gcc
 all: $(EXE)
 
 $(EXE): manager.c
-	$(CC) -Wall -O $^ -o $@
+	$(CC) -Wall -O2 $^ -o $@
 
 clean:
 	rm -f $(EXE)
