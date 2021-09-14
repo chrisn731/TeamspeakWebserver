@@ -211,6 +211,7 @@ static int do_init_module(struct module *mod)
 	case 0:
 		prctl(PR_SET_PDEATHSIG, SIGHUP);
 		mod->init(); /* DOES NOT RETURN */
+		break;
 	default:
 		mod->pid = cpid;
 		break;
@@ -229,19 +230,20 @@ static void child_death_handler(int signum)
 	int i, status = 0;
 
 	(void) signum;
-	dead_child = waitpid(-1, &status, WNOHANG);
-	if (dead_child < 0)
-		die("Failed to wait for stopped child.");
-
-	for (i = 0; i < ARRAY_SIZE(mods); i++) {
-		struct module *mod = mods[i];
-		if (dead_child == mod->pid) {
-			mod->needs_restart = 1;
-			mod->wstatus = status;
-			manager.mods_need_restart = 1;
-			return;
+	/* wait() on all dead children */
+	while ((dead_child = waitpid(-1, &status, WNOHANG)) > 0) {
+		for (i = 0; i < ARRAY_SIZE(mods); i++) {
+			struct module *mod = mods[i];
+			if (dead_child == mod->pid) {
+				mod->needs_restart = 1;
+				mod->wstatus = status;
+				mod->pid = -1;
+				manager.mods_need_restart = 1;
+			}
 		}
 	}
+	if (dead_child < 0)
+		die("Failed to wait for stopped child.");
 }
 
 
@@ -371,6 +373,7 @@ static int kill_pid(int pid)
  */
 static void __noreturn shutdown_manager(void)
 {
+	int i;
 	struct sigaction act = {
 		.sa_handler = SIG_DFL
 	};
@@ -379,18 +382,16 @@ static void __noreturn shutdown_manager(void)
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
 		log_err("Error reseting child death handler.");
 
-	if (ts_bot.pid > 0) {
-		if (kill_pid(ts_bot.pid) < 0)
-			log_err("Error killing bot - pid: %d", ts_bot.pid);
-		else
-			log_info("Bot shutdown complete.");
-	}
+	for (i = 0; i < ARRAY_SIZE(mods); i++) {
+		struct module *m = mods[i];
 
-	if (ts_webserver.pid > 0) {
-		if (kill_pid(ts_webserver.pid) < 0)
-			log_err("Error killing server - pid: %d", ts_webserver.pid);
-		else
-			log_info("Server shutdown complete.");
+		if (m->pid > 0) {
+			if (kill_pid(m->pid))
+				log_err("Error killing '%s' with pid (%d)",
+						m->mod_name, m->pid);
+			else
+				log_info("'%s' shutdown complete", m->mod_name);
+		}
 	}
 	if (close(manager.listen_sock) < 0)
 		log_err("Error closing manager listen socket");
@@ -435,26 +436,66 @@ static int setup_sig_handlers(void)
 	return 0;
 }
 
-static void restart_mods(void)
+/*
+ * __restart_mods - attempts to startup modules marked in need of a restart
+ *
+ * If a module refuses to startup (aka failed to start many times) then we
+ * will just ignore it, log it, and move on.
+ */
+static void __restart_mods(void)
 {
 	int i;
 
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
-		if (m->needs_restart) {
+
+		/* Keep retrying to init the module */
+		while (m->needs_restart) {
 			log_info("%s has died with code (%d) attempting to restart",
 					m->mod_name, m->wstatus);
-			if (++m->num_fails >= MAX_FAIL_FOR_STOP) {
+			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
+				if (do_init_module(m))
+					continue;
+			} else {
 				log_err("%s failed too many times. Leaving off",
 						m->mod_name);
-				m->needs_restart = 0;
-				m->pid = -1;
-				continue;
 			}
-			if (!do_init_module(m))
-				m->needs_restart = 0;
+			/*
+			 * We either failed too many times or the module is
+			 * alive. Either way, we are done fiddling with this
+			 * module.
+			 */
+			m->needs_restart = 0;
 		}
 	}
+}
+
+/*
+ * restart_mods - set up to restart modules
+ *
+ * Called only by the manager when it is alerted that one of it's children
+ * died. To make sure that our restart routine picks up on all failed modules,
+ * we disable SIGCHLD interrupts. Once we finish restarting, reenable the
+ * interrupts. This flow guarentees we do not miss any dead modules.
+ */
+static void restart_mods(void)
+{
+	sigset_t set, waiting;
+
+	/* Do not let other children dying interrupt us */
+	sigemptyset(&set);
+	sigaddset(&set, SIGCHLD);
+	sigprocmask(SIG_BLOCK, &set, NULL);
+	__restart_mods();
+
+	/*
+	 * Check to see if another child died while we were restarting
+	 * other dead modules
+	 */
+	sigpending(&waiting);
+	if (!sigismember(&waiting, SIGCHLD))
+		manager.mods_need_restart = 0;
+	sigprocmask(SIG_UNBLOCK, &set, NULL);
 }
 
 /* New manager commands should be added to this enum */
@@ -539,7 +580,6 @@ reenable:
 	}
 	if (manager.running && manager.mods_need_restart) {
 		restart_mods();
-		manager.mods_need_restart = 0;
 		goto reenable;
 	}
 done:
