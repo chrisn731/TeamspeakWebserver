@@ -209,8 +209,13 @@ static int do_init_module(struct module *mod)
 		log_err("Failed to fork for %s", mod->mod_name);
 		return -1;
 	case 0:
-		prctl(PR_SET_PDEATHSIG, SIGHUP);
+		if (prctl(PR_SET_PDEATHSIG, SIGHUP) < 0) {
+			log_err("%s: '%s' failed to do prctl()\n",
+					__func__, m->mod_name);
+			_exit(1);
+		}
 		mod->init(); /* DOES NOT RETURN */
+		die("%s init function should not return", m->mod_name);
 		break;
 	default:
 		mod->pid = cpid;
@@ -423,6 +428,7 @@ static int setup_sig_handlers(void)
 	sigset_t to_ignore;
 
 	memset(&act, 0, sizeof(act));
+	sigemptyset(&to_ignore);
 	sigaddset(&to_ignore, SIGCHLD);
 	act.sa_handler = child_death_handler;
 	act.sa_mask = to_ignore;
@@ -449,10 +455,10 @@ static void __restart_mods(void)
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
 
+		log_info("%s has died with code (%d) attempting to restart",
+				m->mod_name, m->wstatus);
 		/* Keep retrying to init the module */
 		while (m->needs_restart) {
-			log_info("%s has died with code (%d) attempting to restart",
-					m->mod_name, m->wstatus);
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
 				if (do_init_module(m))
 					continue;
@@ -480,7 +486,7 @@ static void __restart_mods(void)
  */
 static void restart_mods(void)
 {
-	sigset_t set, waiting;
+	sigset_t set;
 
 	/* Do not let other children dying interrupt us */
 	sigemptyset(&set);
@@ -488,13 +494,8 @@ static void restart_mods(void)
 	sigprocmask(SIG_BLOCK, &set, NULL);
 	__restart_mods();
 
-	/*
-	 * Check to see if another child died while we were restarting
-	 * other dead modules
-	 */
-	sigpending(&waiting);
-	if (!sigismember(&waiting, SIGCHLD))
-		manager.mods_need_restart = 0;
+	/* Reenable child death interrupts */
+	manager.mods_need_restart = 0;
 	sigprocmask(SIG_UNBLOCK, &set, NULL);
 }
 
