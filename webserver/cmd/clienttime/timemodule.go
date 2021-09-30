@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	ltcExe  = "./../ltc/target/release/rltc"
+	ltcExe  = "./../ltc/target/release/ltc"
 	logsDir = "./../logs"
 	numClients = 13
 	prog = "rust"
