@@ -12,32 +12,32 @@ use std::io::BufReader;
  */
 #[derive(Eq)]
 struct Client {
-	/* name: Most recent name the client has used on the teamspeak. */
+    /* name: Most recent name the client has used on the teamspeak. */
     name: String,
 
-	/*
-	 * last_time_connected: Keeps track of when the most recent time the
-	 * client connected to the server.
-	 */
+    /*
+     * last_time_connected: Keeps track of when the most recent time the
+     * client connected to the server.
+     */
     last_time_connected: i64,
 
-	/*
-	 * total_time_connected: Keeps track of the total time spent connected
-	 * across multiple disconnects.
-	 */
+    /*
+     * total_time_connected: Keeps track of the total time spent connected
+     * across multiple disconnects.
+     */
     total_time_connected: i64,
 
-	/*
-	 * num_conn: The number of concurrent connections the client currently
-	 * has. e.g, if 'Bob' joins under the name 'Bob' and then rejoins the
-	 * same server 'Bob1' will show up in the logs with the same id.
-	 * This leaves us with:
-	 * 	'Bob' (last_time_connected: 30)
-	 * 	'Bob1' (last_time_connected: 65) <- We don't want that time.
-	 * However, we don't want to lost track of the total time connected
-	 * if one of these two connections disconnect. This member solves this
-	 * issue.
-	 */
+    /*
+     * num_conn: The number of concurrent connections the client currently
+     * has. e.g, if 'Bob' joins under the name 'Bob' and then rejoins the
+     * same server 'Bob1' will show up in the logs with the same id.
+     * This leaves us with:
+     * 	'Bob' (last_time_connected: 30)
+     * 	'Bob1' (last_time_connected: 65) <- We don't want that time.
+     * However, we don't want to lost track of the total time connected
+     * if one of these two connections disconnect. This member solves this
+     * issue.
+     */
     num_conn: u32,
 }
 
@@ -155,10 +155,7 @@ impl ClientDatabase {
 }
 
 fn sort_and_print_client_times(db: ClientDatabase) {
-    let mut clients: Vec<Client> =
-        db.map.into_iter()
-        .map(|(_id, c)| c)
-        .collect();
+    let mut clients: Vec<Client> = db.map.into_iter().map(|(_id, c)| c).collect();
     /*
      * Sort the clients in reverse order to make it easier for it to be parsed
      * when the output is picked up by the webserver
