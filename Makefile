@@ -1,10 +1,20 @@
-EXE = manager
 CC = gcc
+LTC_DIR = ./ltc
+WEBSERVER_DIR = ./webserver
 
-all: $(EXE)
+all: manager webserver ltc
+	$(info Done.)
 
-$(EXE): manager.c
+manager: manager.c
 	$(CC) -Wall -O2 $^ -o $@
+
+webserver:
+	$(MAKE) -C $(WEBSERVER_DIR)
+
+ltc:
+	$(MAKE) -C $(LTC_DIR)
 
 clean:
 	rm -f $(EXE)
+
+.PHONY: ltc webserver
