@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	ltcExe  = "./../ltc/ltc"
+	ltcExe  = "./../ltc/target/release/rltc"
 	logsDir = "./../logs"
+	numClients = 13
+	prog = "rust"
 )
 
 type ClientTimeEntry struct {
@@ -20,8 +22,14 @@ type ClientTimeEntry struct {
 
 func fetchClientTime() string {
 	var stdout bytes.Buffer
+	var cmd *exec.Cmd
 
-	cmd := exec.Command(ltcExe, "-h", "13", "-s", logsDir)
+	if prog == "C" {
+		clientsToPrint := strconv.Itoa(numClients)
+		cmd = exec.Command(ltcExe, "-h", clientsToPrint, "-s", logsDir)
+	} else {
+		cmd = exec.Command(ltcExe, logsDir)
+	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr
 	cmd.Run()
@@ -32,7 +40,11 @@ func BuildClientTimes() []ClientTimeEntry {
 	var entries []ClientTimeEntry = nil
 	times := strings.Split(fetchClientTime(), "\n")
 
-	for _, line := range times {
+	for i, line := range times {
+		if i >= 13 {
+			break
+		}
+
 		timeNameSplit := strings.Split(line, "\t")
 		if len(line) <= 0 {
 			continue

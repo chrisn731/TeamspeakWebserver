@@ -252,27 +252,23 @@ static void get_id(const char *buf, char *t, int buf_len)
  */
 static int parse_line(const char *buf, char *name_buf, int *id)
 {
-	int action = NO_ACTION;
+	int action;
 	char id_buf[10] = {0};
 	char *action_str;
 
 	action_str = strstr(buf, "client connected");
 	if (action_str) {
 		action = CLIENT_CONNECT;
+		buf = action_str + strlen("client connected ");
 	} else {
 		action_str = strstr(buf, "client disconnected");
 		if (action_str)
 			action = CLIENT_DISCONNECT;
 		else
 			return NO_ACTION;
+		buf = action_str + strlen("client disconnected ");
 	}
 
-	/*
-	 * This for loop skips past the 'client (dis)connected' text we just
-	 * found to set us up to call get_name()
-	 */
-	for (buf = action_str; *buf && *buf != '\''; buf++)
-		;
 	buf += get_name(buf, name_buf, MAX_CLIENT_NAME);
 	get_id(buf, id_buf, sizeof(buf));
 	*id = atoi(id_buf);
