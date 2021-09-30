@@ -211,11 +211,11 @@ static int do_init_module(struct module *mod)
 	case 0:
 		if (prctl(PR_SET_PDEATHSIG, SIGHUP) < 0) {
 			log_err("%s: '%s' failed to do prctl()\n",
-					__func__, m->mod_name);
+					__func__, mod->mod_name);
 			_exit(1);
 		}
 		mod->init(); /* DOES NOT RETURN */
-		die("%s init function should not return", m->mod_name);
+		die("%s init function should not return", mod->mod_name);
 		break;
 	default:
 		mod->pid = cpid;
