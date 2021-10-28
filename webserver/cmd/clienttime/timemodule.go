@@ -9,10 +9,11 @@ import (
 )
 
 const (
-	ltcExe  = "./../ltc/target/release/ltc"
+	rustLtcExe  = "./../ltc/target/release/ltc"
+	cLtcExe = "./../ltc/old_ltc/ltc"
 	logsDir = "./../logs"
 	numClients = 13
-	prog = "rust"
+	prog = "C"
 )
 
 type ClientTimeEntry struct {
@@ -26,9 +27,9 @@ func fetchClientTime() string {
 
 	if prog == "C" {
 		clientsToPrint := strconv.Itoa(numClients)
-		cmd = exec.Command(ltcExe, "-h", clientsToPrint, "-s", logsDir)
+		cmd = exec.Command(cLtcExe, "-h", clientsToPrint, "-s", logsDir)
 	} else {
-		cmd = exec.Command(ltcExe, logsDir)
+		cmd = exec.Command(rustLtcExe, logsDir)
 	}
 	cmd.Stdout = &stdout
 	cmd.Stderr = os.Stderr

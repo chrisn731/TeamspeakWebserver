@@ -276,6 +276,44 @@ static int parse_line(const char *buf, char *name_buf, int *id)
 }
 
 /*
+ * str_to_time - Convert time string to seconds since Unix Epoch
+ *
+ * UTC_DIFF is the hour difference from Universal Time Coordinated.
+ * East coast is 5 hours.
+ * Sidenote:
+ * This function was made because mktime() works when you call it once.
+ * In this case, we call it hunderds of thousands of times causing mktime()
+ * to bottleneck the entire program.
+ *
+ * Using mktime() runtime average: 1.171s
+ * Using str_to_time() runtime average: 0.119s
+ */
+#define UTC_DIFF 5
+static time_t str_to_time(const char *time_str)
+{
+	struct tm tm;
+	long tyears, tdays, leaps, utc_hrs;
+	const int mon_days[] = {
+		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+	};
+	int i;
+
+	if (!strptime(time_str, "%Y-%m-%d %H:%M:%S", &tm))
+		return -1;
+
+	tyears = tm.tm_year - 70;
+	leaps = (tyears + 2) / 4;
+	for (i = 0, tdays = 0; i < tm.tm_mon; i++)
+		tdays += mon_days[i];
+
+	tdays += tm.tm_mday - 1;
+	tdays = tdays + (tyears * 365) + leaps;
+	utc_hrs = tm.tm_hour + UTC_DIFF;
+
+	return (tdays * 86400) + (utc_hrs * 3600) + (tm.tm_min * 60) + tm.tm_sec;
+}
+
+/*
  * process_line - process a single line of a file
  *
  * The purpose of this function is to act on whatever parse_line returned. If
@@ -289,14 +327,14 @@ static void process_line(const char *buf)
 	char client_name[MAX_CLIENT_NAME] = {0};
 	int id, action;
 
-	/* First grab the time the line was written */
-	if (!strptime(buf, "%Y-%m-%d %H:%M:%S", &tm))
+	/* Get the client anme and id */
+	action = parse_line(buf, client_name, &id);
+	if (action == NO_ACTION)
 		return;
-	time = mktime(&tm);
+
+	time = str_to_time(buf);
 	if (time == -1 || time < time_constraint)
 		return;
-	/* Fetch the important information */
-	action = parse_line(buf, client_name, &id);
 
 	switch (action) {
 	case CLIENT_CONNECT:
@@ -305,10 +343,9 @@ static void process_line(const char *buf)
 	case CLIENT_DISCONNECT:
 		log_disconn(client_name, id, time);
 		break;
-	case NO_ACTION:
-		break;
 	default:
 		die("bad action");
+	case NO_ACTION:
 		break;
 	}
 }
