@@ -11,6 +11,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -46,6 +47,31 @@
 #endif
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #define __noreturn __attribute__((__noreturn__))
+#define NUM_MODS 2
+
+#define block_sigchld_interrupt() \
+	do {								\
+		sigset_t set;						\
+		/* Do not let other children dying interrupt us */	\
+		sigemptyset(&set);					\
+		sigaddset(&set, SIGCHLD);				\
+		sigprocmask(SIG_BLOCK, &set, NULL);			\
+	} while (0)
+
+
+#define unblock_sigchld_interrupt()					\
+	do {								\
+		sigset_t set;						\
+		sigemptyset(&set);					\
+		sigaddset(&set, SIGCHLD);				\
+		sigprocmask(SIG_UNBLOCK, &set, NULL);			\
+	} while (0)
+
+enum manager_status {
+	STARTING,
+	RUNNING,
+	STOPPED,
+};
 
 /*
  * manager struct
@@ -61,8 +87,12 @@ static struct {
 	 * Marked as volatile because the value can be changed by the SIGTERM
 	 * signal handler.
 	 */
-	volatile unsigned int running;
+	volatile enum manager_status status;
 	volatile unsigned int mods_need_restart;
+	struct {
+		const char *mod_name;
+		int pipefd;
+	} mod_pipes[NUM_MODS];
 } manager;
 
 struct module {
@@ -103,7 +133,7 @@ static struct module ts_webserver = {
 	.init = &init_ts_webserver,
 	.num_fails = 0,
 };
-static struct module *mods[] = { &ts_bot, &ts_webserver };
+static struct module *mods[NUM_MODS] = { &ts_bot, &ts_webserver };
 
 static char __log_buf[LOG_BUF_SIZE];
 
@@ -175,6 +205,9 @@ static void __log_err(const char *fmt, ...)
 	va_end(argp);
 }
 
+/*
+ * init_ts_bot - Teamspeak bot startup function
+ */
 static void __noreturn init_ts_bot(void)
 {
 	execv("/bin/python", ts_bot.argv);
@@ -182,6 +215,9 @@ static void __noreturn init_ts_bot(void)
 	_exit(1);
 }
 
+/*
+ * init_ts_webserver - Teamspeak webserver startup function
+ */
 static void __noreturn init_ts_webserver(void)
 {
 	if (chdir("./webserver") < 0)
@@ -197,18 +233,49 @@ static void __noreturn init_ts_webserver(void)
  *
  * This function calls prctl() (which is linux specific BTW) so that our
  * initialized module dies off if the manager were to unexpectedly die.
+ *
+ * This function also sets up a communication pipe between the parent and
+ * it's children. This is so we can nicely write down what they are saying
+ * in a better format than having them write it themselves.
  */
 static int do_init_module(struct module *mod)
 {
-	int cpid;
+	int cpid, i, pipefds[2];
 
 	log_info("Attempting to start up '%s'", mod->mod_name);
+	if (pipe(pipefds) < 0) {
+		log_err("Failed to set up pipe for %s", mod->mod_name);
+		return -1;
+	}
+
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!manager.mod_pipes[i].pipefd) {
+			manager.mod_pipes[i].pipefd = pipefds[0];
+			manager.mod_pipes[i].mod_name = mod->mod_name;
+			break;
+		}
+	}
+
 	cpid = fork();
 	switch (cpid) {
 	case -1:
 		log_err("Failed to fork for %s", mod->mod_name);
 		return -1;
 	case 0:
+		/* We don't need that read end */
+		if (close(pipefds[0]) < 0) {
+			log_err("%s: failed to close read end of pipe for '%s'",
+					__func__, mod->mod_name);
+		}
+		/* Have the output of our module point to the write end */
+		if (dup2(pipefds[1], STDOUT_FILENO) < 0 ||
+		    dup2(pipefds[1], STDERR_FILENO) < 0) {
+			log_err("%s: '%s' failed to dup",
+					__func__, mod->mod_name);
+			_exit(1);
+		}
+		/* This fd is now useless */
+		close(pipefds[1]);
 		if (prctl(PR_SET_PDEATHSIG, SIGHUP) < 0) {
 			log_err("%s: '%s' failed to do prctl()\n",
 					__func__, mod->mod_name);
@@ -221,6 +288,18 @@ static int do_init_module(struct module *mod)
 		mod->pid = cpid;
 		break;
 	}
+	if (close(pipefds[1]) < 0)
+		log_err("Failed to close write end of pipe for '%s'",
+						mod->mod_name);
+
+	/*
+	 * The parent should NOT block on reads from a pipe. Manager needs to
+	 * stay on his toes.
+	 */
+	if (fcntl(pipefds[0], F_SETFL, O_NONBLOCK) < 0)
+		log_err("Setting O_NONBLOCK on read end of pipe for '%s' failed!"
+			" Manager will for SURE not work as expected!",
+			mod->mod_name);
 	return 0;
 }
 
@@ -285,13 +364,19 @@ static void init_manager_log_file(void)
 static int setup_comm_socket(void)
 {
 	struct sockaddr_un sa;
-	int sfd, on = 1;
+	int sfd, flags, on = 1;
 
 	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sfd < 0)
 		die("Error creating socket file descriptor");
 	if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
 		die("Error setting SO_REUSEADDR failed for setsockopt");
+
+	flags = fcntl(sfd, F_GETFD);
+	if (flags < 0)
+		die("Error getting socket flags");
+	if (fcntl(sfd, F_SETFD, flags | FD_CLOEXEC) < 0)
+		die("Error setting socket to close on exec");
 
 	sa.sun_family = AF_LOCAL;
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
@@ -310,14 +395,22 @@ static int setup_comm_socket(void)
 static void init_manager(void)
 {
 	struct stat st;
+	int nullfd;
 
+	manager.status = STARTING;
 	if (!stat(MANAGER_SOCK_PATH, &st))
 		die("Manager already running.");
 	init_manager_log_file();
+
+	/* We successfully set up the log file, we don't need stdin anymore */
+	nullfd = open("/dev/null", O_RDWR);
+	if (nullfd < 0)
+		die("Failed to open '/dev/null' for stdin redirect!");
+	if (dup2(nullfd, STDIN_FILENO) < 0)
+		die("Failed to redirect stdin to '/dev/null'");
 	if (daemon(1, 1) < 0)
 		die("Error daemonizing");
 	manager.listen_sock = setup_comm_socket();
-	manager.running = 1;
 }
 
 /*
@@ -409,7 +502,7 @@ static void __noreturn shutdown_manager(void)
 static void term_handler(int sign)
 {
 	(void) sign;
-	manager.running = 0;
+	manager.status = STOPPED;
 }
 
 /*
@@ -457,14 +550,23 @@ static void __restart_mods(void)
 
 		log_info("%s has died with code (%d) attempting to restart",
 				m->mod_name, m->wstatus);
+		if (manager.status == STARTING) {
+			log_err("%s failed on manager startup!", m->mod_name);
+			m->needs_restart = 0;
+			continue;
+		}
+
+		if (manager.status == STOPPED)
+			return;
+
 		/* Keep retrying to init the module */
 		while (m->needs_restart) {
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
 				if (do_init_module(m))
 					continue;
 			} else {
-				log_err("%s failed too many times. Leaving off",
-						m->mod_name);
+				log_err("%s failed too many times. "
+					"Leaving off", m->mod_name);
 			}
 			/*
 			 * We either failed too many times or the module is
@@ -486,23 +588,38 @@ static void __restart_mods(void)
  */
 static void restart_mods(void)
 {
-	sigset_t set;
-
 	/* Do not let other children dying interrupt us */
-	sigemptyset(&set);
-	sigaddset(&set, SIGCHLD);
-	sigprocmask(SIG_BLOCK, &set, NULL);
+	block_sigchld_interrupt();
 	__restart_mods();
 
 	/* Reenable child death interrupts */
 	manager.mods_need_restart = 0;
-	sigprocmask(SIG_UNBLOCK, &set, NULL);
+	unblock_sigchld_interrupt();
+}
+
+
+static void req_restart_mod(const char *req_mod)
+{
+	int i;
+
+	block_sigchld_interrupt();
+	for (i = 0; i < ARRAY_SIZE(mods); i++) {
+		struct module *m = mods[i];
+
+		if (!strcmp(m->mod_name, req_mod)) {
+			kill_pid(m->pid);
+			m->pid = -1;
+		}
+		__restart_mods();
+	}
+	unblock_sigchld_interrupt();
 }
 
 /* New manager commands should be added to this enum */
 enum manager_cmds {
 	CMD_NONE,
 	CMD_SHUTDOWN,
+	CMD_RESTART_MOD,
 };
 
 static enum manager_cmds manager_process_input(const char *input)
@@ -510,6 +627,78 @@ static enum manager_cmds manager_process_input(const char *input)
 	if (!strcmp(input, "stop"))
 		return CMD_SHUTDOWN;
 	return CMD_NONE;
+}
+
+static void read_mod_input(int fd, const char *mod_name)
+{
+	char buf[2048];
+	int nr, bytes_left = sizeof(buf);
+
+	bytes_left -= sprintf(buf, "[%s] ", mod_name);
+	while ((nr = read(fd, buf + sizeof(buf) - bytes_left, bytes_left)) > 0) {
+		bytes_left -= nr;
+		if (!bytes_left) {
+			write(STDOUT_FILENO, buf, sizeof(buf));
+			bytes_left = sizeof(buf);
+		}
+	}
+	if (bytes_left != sizeof(buf)) {
+		char *lf = memchr(buf, '\n', sizeof(buf));
+		if (!lf)
+			buf[sizeof(buf) - bytes_left--] = '\n';
+		write(STDOUT_FILENO, buf, sizeof(buf) - bytes_left);
+	}
+}
+
+/*
+ * read_socket - read in socket content
+ *
+ * We only get here if the socket fd got triggered from the poll within
+ * start_manager_loop()
+ */
+static void read_socket(void)
+{
+	char buffer[MAX_CMD_LEN];
+	int cfd, nr;
+
+	cfd = accept(manager.listen_sock, NULL, NULL);
+	if (cfd < 0) {
+		if (errno != EINTR)
+			log_err("Error while trying to accept sock connection.");
+		return;
+	}
+
+	/*
+	 * It's /techinically/ not really an error if read returns 0,
+	 * but if we did get 0 that means that the socket connection
+	 * was closed.
+	 *
+	 * Thus, if the connection was closed and we were expecting to
+	 * read some command we will just treat it as an error.
+	 */
+	nr = read(cfd, buffer, sizeof(buffer) - 1);
+	if (nr <= 0) {
+		log_err("Error while reading from sock connection.");
+		goto done;
+	}
+	buffer[nr] = '\0';
+
+	switch (manager_process_input(buffer)) {
+	case CMD_SHUTDOWN:
+		manager.status = STOPPED;
+		break;
+	case CMD_RESTART_MOD:
+		// TODO Finish this
+		//req_restart_mod(strstr(buffer, "restart") + strlen("restart "));
+		break;
+	case CMD_NONE:
+	default:
+		break;
+	}
+done:
+	if (close(cfd) < 0)
+		log_err("Error attempting to close sock connection.");
+
 }
 
 /*
@@ -539,51 +728,39 @@ static enum manager_cmds manager_process_input(const char *input)
  */
 static void start_manager_loop(void)
 {
-reenable:
-	while (manager.running && !manager.mods_need_restart) {
-		int cfd, nr;
-		char buffer[MAX_CMD_LEN];
+	struct pollfd fds[NUM_MODS + 1];
+	int i;
 
-		cfd = accept(manager.listen_sock, NULL, NULL);
-		if (cfd < 0) {
+	for (i = 0; i < NUM_MODS; i++) {
+		fds[i].fd = manager.mod_pipes[i].pipefd;
+		fds[i].events = POLLIN;
+	}
+	fds[i].fd = manager.listen_sock;
+	fds[i].events = POLLIN;
+
+	while (manager.status == RUNNING) {
+		int readyfd;
+
+		if (manager.mods_need_restart)
+			restart_mods();
+
+		readyfd = poll(fds, NUM_MODS + 1, -1);
+		if (readyfd < 0) {
 			if (errno != EINTR)
-				log_err("Error while trying to accept sock connection.");
+				log_err("poll fail");
 			continue;
 		}
 
-		/*
-		 * It's /techinically/ not really an error if read returns 0,
-		 * but if we did get 0 that means that the socket connection
-		 * was closed.
-		 *
-		 * Thus, if the connection was closed and we were expecting to
-		 * read some command we will just treat it as an error.
-		 */
-		nr = read(cfd, buffer, sizeof(buffer) - 1);
-		if (nr <= 0) {
-			log_err("Error while reading from sock connection.");
-			close(cfd);
-			continue;
+		for (i = 0; i < ARRAY_SIZE(fds); i++) {
+			if (fds[i].revents & POLLIN) {
+				if (fds[i].fd == manager.listen_sock)
+					read_socket();
+				else
+					read_mod_input(fds[i].fd,
+						manager.mod_pipes[i].mod_name);
+			}
 		}
-		buffer[nr] = '\0';
-
-		switch (manager_process_input(buffer)) {
-		case CMD_SHUTDOWN:
-			goto done;
-			break;
-		case CMD_NONE:
-		default:
-			break;
-		}
-
-		if (close(cfd) < 0)
-			log_err("Error attempting to close sock connection.");
 	}
-	if (manager.running && manager.mods_need_restart) {
-		restart_mods();
-		goto reenable;
-	}
-done:
 	shutdown_manager();
 	NOTREACHED();
 }
@@ -638,6 +815,7 @@ int main(int argc, char **argv)
 	if (should_init_server && do_init_module(&ts_webserver))
 		return 1;
 
+	manager.status = RUNNING;
 	start_manager_loop();
 	return 0;
 }
