@@ -4,6 +4,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -91,6 +92,17 @@ static void die(const char *fmt, ...)
 	exit(1);
 }
 
+static void print_warn(const char *fmt, ...)
+{
+	va_list argp;
+
+	va_start(argp, fmt);
+	vfprintf(stderr, fmt, argp);
+	va_end(argp);
+	fputc('\n', stderr);
+}
+
+
 static void die_usage(const char *prog_name)
 {
 	fprintf(stdout,
@@ -128,7 +140,7 @@ static __hot void log_conn(const char *client_name, int id, time_t t)
 found:
 	if (++c->num_conn == 1) {
 		c->last_time_connected = t;
-		if (strcmp(c->name, client_name)) {
+		if (strncmp(c->name, client_name, MAX_CLIENT_NAME)) {
 			/*
 			 * If the name of the client is different from what we
 			 * have currently saved, update their name so we always
@@ -170,7 +182,7 @@ found:
  * 		searching by name will cause the algorithm to add Bob's time
  * 		spent on the server to Alice's time.
  */
-static __hot void log_disconn(const char *client_name, int id, time_t t_disconn)
+static __hot void log_disconn(int id, time_t t_disconn)
 {
 	struct client *c;
 
@@ -195,36 +207,36 @@ static int get_name(const char *buf, char *t, int buf_len)
 	 * When we enter in here, *buf should be pointing to an apostrophe.
 	 * Thus, increment the buffer to pass it and get to the name.
 	 */
-	if (*buf == '\'')
+	if (*buf == '\'') {
 		buf++;
-	while (nr++ < buf_len) {
+		nr++;
+	}
+	for (; nr < buf_len; nr++) {
 		/*
-		 * Teamspeak allows more than ascii for client names.
-		 * This causes log files to have name strings as '&#95564&#865'.
-		 * I want to keep this simple. So, only allow ascii characters.
+		 * End of name is denoted by: '(
+		 * That is the start of the id string
 		 */
-		if (*buf > 0) {
-			if (*buf == '\'' && buf[1] == '(')
-				break;
-			*t++ = *buf;
-		}
-		buf++;
+		if (*buf == '\'' && buf[1] == '(')
+			break;
+		*t++ = *buf++;
 	}
 	return nr;
 }
 
-static void get_id(const char *buf, char *t, int buf_len)
+static long get_id(const char *buf)
 {
-	int nr;
+	long val;
+	char *endp;
 
 	/*
 	 * When we enter here: buf -> '(id:#) so,
 	 * buf + 5 -> # (the number we want)
 	 */
 	buf += 5;
-	for (nr = 0; isdigit(*buf) && nr < buf_len; buf++, nr++)
-		*t++ = *buf;
-
+	val = strtol(buf, &endp, 10);
+	if (val == LONG_MIN || val == LONG_MAX || endp == buf || *endp != ')')
+		return -1;
+	return val;
 }
 
 #define NO_ACTION 0x00
@@ -253,7 +265,6 @@ static void get_id(const char *buf, char *t, int buf_len)
 static int parse_line(const char *buf, char *name_buf, int *id)
 {
 	int action;
-	char id_buf[10] = {0};
 	char *action_str;
 
 	action_str = strstr(buf, "client connected");
@@ -270,8 +281,7 @@ static int parse_line(const char *buf, char *name_buf, int *id)
 	}
 
 	buf += get_name(buf, name_buf, MAX_CLIENT_NAME);
-	get_id(buf, id_buf, sizeof(buf));
-	*id = atoi(id_buf);
+	*id = get_id(buf);
 	return action;
 }
 
@@ -289,16 +299,16 @@ static int parse_line(const char *buf, char *name_buf, int *id)
  * Using str_to_time() runtime average: 0.119s
  */
 #define UTC_DIFF 5
-static time_t str_to_time(const char *time_str)
+static time_t str_to_time(const char *time_str, const char *fmt)
 {
-	struct tm tm;
+	struct tm tm = {0};
 	long tyears, tdays, leaps, utc_hrs;
 	const int mon_days[] = {
 		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
 	};
 	int i;
 
-	if (!strptime(time_str, "%Y-%m-%d %H:%M:%S", &tm))
+	if (!strptime(time_str, fmt, &tm))
 		return -1;
 
 	tyears = tm.tm_year - 70;
@@ -309,7 +319,6 @@ static time_t str_to_time(const char *time_str)
 	tdays += tm.tm_mday - 1;
 	tdays = tdays + (tyears * 365) + leaps;
 	utc_hrs = tm.tm_hour + UTC_DIFF;
-
 	return (tdays * 86400) + (utc_hrs * 3600) + (tm.tm_min * 60) + tm.tm_sec;
 }
 
@@ -322,26 +331,32 @@ static time_t str_to_time(const char *time_str)
  */
 static void process_line(const char *buf)
 {
-	struct tm tm = {0};
 	time_t time;
 	char client_name[MAX_CLIENT_NAME] = {0};
 	int id, action;
 
-	/* Get the client anme and id */
 	action = parse_line(buf, client_name, &id);
-	if (action == NO_ACTION)
+	/* id = 1 is serveradmin, disregard him */
+	if (action == NO_ACTION || id == 1)
 		return;
 
-	time = str_to_time(buf);
-	if (time == -1 || time < time_constraint)
+	if (id <= 0) {
+		print_warn("Failed to get id! Line: %s", buf);
 		return;
+	}
+
+	time = str_to_time(buf, "%Y-%m-%d %H:%M:%S");
+	if (time == -1 || time < time_constraint) {
+		print_warn("Failed to parse time for line: %s", buf);
+		return;
+	}
 
 	switch (action) {
 	case CLIENT_CONNECT:
 		log_conn(client_name, id, time);
 		break;
 	case CLIENT_DISCONNECT:
-		log_disconn(client_name, id, time);
+		log_disconn(id, time);
 		break;
 	default:
 		die("bad action");
@@ -364,8 +379,9 @@ static int parse_file(FILE *fp)
 
 	while (fgets(buf, MAX_LINE_SIZE, fp)) {
 		if (!memchr(buf, '\n', MAX_LINE_SIZE))
-			die("Line that starts with %.*s is too long to parse",
-					MAX_LINE_SIZE - 1, buf);
+			die("Line that starts with %.*s is too long to parse. "
+				"Consider increasing MAX_LINE_SIZE",
+				MAX_LINE_SIZE - 1, buf);
 		process_line(buf);
 	}
 	return feof(fp) ? 0 : 1;
@@ -426,14 +442,14 @@ static void print_client_list(void)
 static void add_to_file_list(const char *full_path, const char *fn)
 {
 	struct log_file *l, *new;
-	struct tm tm = {0};
 	time_t log_ctime;
 
-	if (!strptime(fn, "ts3server_%Y-%m-%d__%H_%M_%S", &tm))
-		die("strptime failed on: %s", fn);
-	log_ctime = mktime(&tm);
-	if (log_ctime == (time_t) -1)
+	log_ctime = str_to_time(fn, "ts3server_%Y-%m-%d__%H_%M_%S");
+	if (log_ctime == (time_t) -1) {
+		print_warn("Failed to add %s to parse list. Times will be off!", fn);
 		return;
+	}
+
 	list_for_each_entry(l, &log_list, list) {
 		/* Sort the files from oldest to newest */
 		if (l->time > log_ctime)
@@ -465,7 +481,9 @@ static void compile_logs(const char *dir)
 
 	dir_len = snprintf(file_path, MAX_FILE_PATH, "%s%s",
 			dir, dir[strlen(dir) - 1] == '/' ? "" : "/");
-	remaining_bytes = MAX_FILE_PATH - dir_len;
+	if (dir_len < 0)
+		die("snprintf() error");
+	remaining_bytes = MAX_FILE_PATH - dir_len - 1; /* 1 reserved for '\0' */
 
 	while ((de = readdir(dp)) != NULL) {
 		/*
@@ -543,21 +561,31 @@ static int list_cmp(const struct list_node *a, const struct list_node *b)
 	return c1->total_time_connected - c2->total_time_connected;
 }
 
+static long get_arg_val(const char *input, char option)
+{
+	char *endptr;
+	long val;
+
+	val = strtol(input, &endptr, 10);
+	if (endptr == input)
+		die("Error parsing input '%s' for option '%c'", input, option);
+	if (val <= INT_MIN || val >= INT_MAX)
+		die("Input '%lu' is too large for option '%c'", val, option);
+	return val;
+}
+
 int main(int argc, char **argv)
 {
 	struct tm tm;
-	unsigned int ld_len;
 	int opt;
-	char *dir_path;
-	const char *log_dir, *prog_name = argv[0];
+	const char *prog_name = argv[0];
 
 	while ((opt = getopt(argc, argv, "d:h:st:")) != -1) {
 		switch (opt) {
 		case 'd':
 			memset(&tm, 0, sizeof(tm));
 			if (!strptime(optarg, "%m-%d-%Y", &tm)) {
-				fprintf(stderr, "Failed to parse -d argument '%s'\n",
-									optarg);
+				print_warn("Failed to parse -d argument '%s'", optarg);
 				die_usage(prog_name);
 			}
 			time_constraint = mktime(&tm);
@@ -568,12 +596,12 @@ int main(int argc, char **argv)
 		case 'h':
 			if (tail_count)
 				die_usage(prog_name);
-			head_count = atoi(optarg);
+			head_count = get_arg_val(optarg, opt);
 			break;
 		case 't':
 			if (head_count)
 				die_usage(prog_name);
-			tail_count = atoi(optarg);
+			tail_count = get_arg_val(optarg, opt);
 			break;
 		case '?':
 		default:
