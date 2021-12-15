@@ -7,6 +7,25 @@
  *
  * When spawed, it daemonizes itself and creates a socket in order to
  * receieve commands.
+ *
+ *
+ *      init_manager()
+ *           |
+ *           v
+ *      start_manager_loop() -> poll() -> read_mod_input()
+ *           ^                     |            |
+ *           |                     v            |
+ *           |                read_socket()     |
+ *           |                     |            |
+ *           |_____________________|____________|
+ */
+
+/*
+ * TODO:
+ * 	- If a child dies, manager still knows about it's pipe. Therefore,
+ * 		the pipe of communication MUST be cleared when the child dies.
+ * 		Probably best if done in child_death_handler()
+ *
  */
 #include <errno.h>
 #include <fcntl.h>
@@ -24,6 +43,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#define __noreturn __attribute__((__noreturn__))
+
 #define LOG_FILE_PATH "/tmp/ts_manager_log.txt"
 #define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
 #define WEBSERVER_PATH "./tswebserver"
@@ -32,9 +53,6 @@
 #define MAX_CMD_LEN 4096
 #define LOG_BUF_SIZE (1 << 13)
 
-#define die(s, ...) __die("[FATAL] " s, ## __VA_ARGS__)
-#define log_info(s, ...) __loginfo("[INFO] " s, ## __VA_ARGS__)
-#define log_err(s, ...) __log_err("[ERR] " s, ## __VA_ARGS__)
 #define NOTREACHED() \
 	do {								\
 		die("Not reached denoted line reached in %s : %d",	\
@@ -46,7 +64,6 @@
 	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
 #endif
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
-#define __noreturn __attribute__((__noreturn__))
 #define NUM_MODS 2
 
 #define block_sigchld_interrupt() \
@@ -73,6 +90,16 @@ enum manager_status {
 	STOPPED,
 };
 
+#define LOG_ERRNO	0x01
+#define LOG_INFO 	0x02
+#define LOG_ERR		0x04
+#define LOG_FATAL	0x08
+#define die(s, ...) do_log(LOG_FATAL, "[FATAL] " s, ## __VA_ARGS__)
+#define diev(s, ...) do_log(LOG_FATAL | LOG_ERRNO, "[FATAL] " s, ## __VA_ARGS__)
+#define log_info(s, ...) do_log(LOG_INFO, "[INFO] " s, ## __VA_ARGS__)
+#define log_err(s, ...) do_log(LOG_ERR, "[ERR] " s, ## __VA_ARGS__)
+#define logv_err(s, ...) do_log(LOG_ERR | LOG_ERRNO, "[ERR] " s, ## __VA_ARGS__)
+
 /*
  * manager struct
  *
@@ -94,6 +121,8 @@ static struct {
 		int pipefd;
 	} mod_pipes[NUM_MODS];
 } manager;
+
+
 
 struct module {
 	/* pathname & argv - args to be used for exec() calls */
@@ -117,7 +146,7 @@ struct module {
 static void init_ts_bot(void);
 static struct module ts_bot = {
 	.mod_name = "ts_bot",
-	.pathname = BOT_PATH,
+	.pathname = "/usr/bin/python",
 	.argv = {"python", BOT_PATH, NULL},
 	.pid = -1,
 	.init = &init_ts_bot,
@@ -153,56 +182,25 @@ static void usage(const char *self)
 	exit(1);
 }
 
-enum log_levels {
-	LOG_INFO,
-	LOG_ERR,
-	LOG_FATAL,
-};
-
-static void do_log(enum log_levels log_level, const char *fmt, va_list args)
+static void do_log(int log_flags, const char *fmt, ...)
 {
+	va_list argp;
 	size_t nw;
 	char *buffer = __log_buf;
+	unsigned int flags = log_flags;
 	int errv = errno;
 
-	nw = vsnprintf(buffer, LOG_BUF_SIZE, fmt, args);
-	if (log_level == LOG_FATAL && errv)
+	va_start(argp, fmt);
+	nw = vsnprintf(buffer, LOG_BUF_SIZE, fmt, argp);
+	va_end(argp);
+	if (flags & LOG_ERRNO)
 		nw += snprintf(buffer + nw, LOG_BUF_SIZE - nw, " - %s",
 							strerror(errv));
 	buffer[nw] = '\n';
 
 	write(STDOUT_FILENO, buffer, nw + 1);
-}
-
-/* Fatal error. Program execution should no longer continue. */
-static void __noreturn __die(const char *fmt, ...)
-{
-	va_list argp;
-	va_start(argp, fmt);
-	do_log(LOG_FATAL, fmt, argp);
-	va_end(argp);
-	exit(1);
-}
-
-/* Normal level logging */
-static void __loginfo(const char *fmt, ...)
-{
-	va_list argp;
-	va_start(argp, fmt);
-	do_log(LOG_INFO, fmt, argp);
-	va_end(argp);
-}
-
-/*
- * Only purpose of this function is to make the code verbose in saying that
- * "Hey something pretty bad happened, but just write it down and keep going."
- */
-static void __log_err(const char *fmt, ...)
-{
-	va_list argp;
-	va_start(argp, fmt);
-	do_log(LOG_FATAL, fmt, argp);
-	va_end(argp);
+	if (flags & LOG_FATAL)
+		exit(1);
 }
 
 /*
@@ -210,8 +208,8 @@ static void __log_err(const char *fmt, ...)
  */
 static void __noreturn init_ts_bot(void)
 {
-	execv("/bin/python", ts_bot.argv);
-	log_err("[BOT ERR] - failed to startup bot");
+	execv(ts_bot.pathname, ts_bot.argv);
+	logv_err("[BOT ERR] - failed to startup bot");
 	_exit(1);
 }
 
@@ -221,10 +219,10 @@ static void __noreturn init_ts_bot(void)
 static void __noreturn init_ts_webserver(void)
 {
 	if (chdir("./webserver") < 0)
-		log_err("Could not change into webserver directory.");
+		logv_err("Could not change into webserver directory.");
 	else
 		execv(ts_webserver.pathname, ts_webserver.argv);
-	log_err("[SERVER ERR] - failed to startup server");
+	logv_err("[SERVER ERR] - failed to startup server");
 	_exit(1);
 }
 
@@ -244,40 +242,43 @@ static int do_init_module(struct module *mod)
 
 	log_info("Attempting to start up '%s'", mod->mod_name);
 	if (pipe(pipefds) < 0) {
-		log_err("Failed to set up pipe for %s", mod->mod_name);
+		logv_err("Failed to set up pipe for %s", mod->mod_name);
 		return -1;
 	}
 
-	for (i = 0; i < NUM_MODS; i++) {
-		if (!manager.mod_pipes[i].pipefd) {
-			manager.mod_pipes[i].pipefd = pipefds[0];
-			manager.mod_pipes[i].mod_name = mod->mod_name;
-			break;
-		}
+	for (i = 0; i < NUM_MODS && manager.mod_pipes[i].pipefd; i++)
+		;
+	if (i >= NUM_MODS) {
+		log_err("%s: Manager has no open pipes for '%s' module!",
+				__func__, mod->mod_name);
+		return -1;
 	}
+
+	manager.mod_pipes[i].pipefd = pipefds[0];
+	manager.mod_pipes[i].mod_name = mod->mod_name;
 
 	cpid = fork();
 	switch (cpid) {
 	case -1:
-		log_err("Failed to fork for %s", mod->mod_name);
+		logv_err("Failed to fork for %s", mod->mod_name);
 		return -1;
 	case 0:
 		/* We don't need that read end */
 		if (close(pipefds[0]) < 0) {
-			log_err("%s: failed to close read end of pipe for '%s'",
+			logv_err("%s: failed to close read end of pipe for '%s'",
 					__func__, mod->mod_name);
 		}
 		/* Have the output of our module point to the write end */
 		if (dup2(pipefds[1], STDOUT_FILENO) < 0 ||
 		    dup2(pipefds[1], STDERR_FILENO) < 0) {
-			log_err("%s: '%s' failed to dup",
+			logv_err("%s: '%s' failed to dup",
 					__func__, mod->mod_name);
 			_exit(1);
 		}
 		/* This fd is now useless */
 		close(pipefds[1]);
 		if (prctl(PR_SET_PDEATHSIG, SIGHUP) < 0) {
-			log_err("%s: '%s' failed to do prctl()\n",
+			logv_err("%s: '%s' failed to do prctl()\n",
 					__func__, mod->mod_name);
 			_exit(1);
 		}
@@ -285,11 +286,12 @@ static int do_init_module(struct module *mod)
 		die("%s init function should not return", mod->mod_name);
 		break;
 	default:
-		mod->pid = cpid;
 		break;
 	}
+	/* From here on is the manager */
+	mod->pid = cpid;
 	if (close(pipefds[1]) < 0)
-		log_err("Failed to close write end of pipe for '%s'",
+		logv_err("Failed to close write end of pipe for '%s'",
 						mod->mod_name);
 
 	/*
@@ -297,7 +299,7 @@ static int do_init_module(struct module *mod)
 	 * stay on his toes.
 	 */
 	if (fcntl(pipefds[0], F_SETFL, O_NONBLOCK) < 0)
-		log_err("Setting O_NONBLOCK on read end of pipe for '%s' failed!"
+		logv_err("Setting O_NONBLOCK on read end of pipe for '%s' failed!"
 			" Manager will for SURE not work as expected!",
 			mod->mod_name);
 	return 0;
@@ -327,7 +329,7 @@ static void child_death_handler(int signum)
 		}
 	}
 	if (dead_child < 0)
-		die("Failed to wait for stopped child.");
+		logv_err("Failed to wait for stopped child.");
 }
 
 
@@ -348,9 +350,9 @@ static void init_manager_log_file(void)
 
 	fd = open(LOG_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0)
-		die("Error opening/creating manager log file");
+		diev("Error opening/creating manager log file");
 	if (dup2(fd, STDOUT_FILENO) < 0 || dup2(fd, STDERR_FILENO) < 0)
-		die("dup2: Error duping");
+		diev("dup2: Error duping");
 	close(fd);
 }
 
@@ -368,24 +370,24 @@ static int setup_comm_socket(void)
 
 	sfd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (sfd < 0)
-		die("Error creating socket file descriptor");
+		diev("Error creating socket file descriptor");
 	if (setsockopt(sfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0)
-		die("Error setting SO_REUSEADDR failed for setsockopt");
+		diev("Error setting SO_REUSEADDR failed for setsockopt");
 
 	flags = fcntl(sfd, F_GETFD);
 	if (flags < 0)
-		die("Error getting socket flags");
+		diev("Error getting socket flags");
 	if (fcntl(sfd, F_SETFD, flags | FD_CLOEXEC) < 0)
-		die("Error setting socket to close on exec");
+		diev("Error setting socket to close on exec");
 
 	sa.sun_family = AF_LOCAL;
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
 	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
 	if (bind(sfd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		die("Error while attempting to bind");
+		diev("Error while attempting to bind");
 	if (listen(sfd, 1) < 0)
-		die("Error setting up socket to listen.");
+		diev("Error setting up socket to listen.");
 	return sfd;
 }
 
@@ -399,17 +401,17 @@ static void init_manager(void)
 
 	manager.status = STARTING;
 	if (!stat(MANAGER_SOCK_PATH, &st))
-		die("Manager already running.");
+		diev("Manager already running.");
 	init_manager_log_file();
 
 	/* We successfully set up the log file, we don't need stdin anymore */
 	nullfd = open("/dev/null", O_RDWR);
 	if (nullfd < 0)
-		die("Failed to open '/dev/null' for stdin redirect!");
+		diev("Failed to open '/dev/null' for stdin redirect!");
 	if (dup2(nullfd, STDIN_FILENO) < 0)
-		die("Failed to redirect stdin to '/dev/null'");
+		diev("Failed to redirect stdin to '/dev/null'");
 	if (daemon(1, 1) < 0)
-		die("Error daemonizing");
+		diev("Error daemonizing");
 	manager.listen_sock = setup_comm_socket();
 }
 
@@ -424,7 +426,7 @@ static void send_command(const char *arg)
 	size_t cmd_len;
 
 	if (stat(MANAGER_SOCK_PATH, &st) < 0)
-		die("Manager not currently running");
+		diev("Manager not currently running");
 
 	cmd_len = strlen(arg);
 	if (cmd_len > MAX_CMD_LEN)
@@ -432,18 +434,18 @@ static void send_command(const char *arg)
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0)
-		die("Error creating socket file descriptor");
+		diev("Error creating socket file descriptor");
 
 	sa.sun_family = AF_LOCAL;
 	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
 	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
 
 	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		die("Error connecting: Ensure that the manager is currently running");
+		diev("Error connecting: Ensure that the manager is currently running");
 	if (write(fd, arg, cmd_len) != cmd_len)
-		die("Error writing to socket.");
+		diev("Error writing to socket.");
 	if (close(fd) < 0)
-		die("Error closing socket fd");
+		diev("Error closing socket fd");
 }
 
 /*
@@ -478,23 +480,23 @@ static void __noreturn shutdown_manager(void)
 
 	/* We are going to be killing children. Ignore SIGCHLD. */
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
-		log_err("Error reseting child death handler.");
+		logv_err("Error reseting child death handler.");
 
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
 
 		if (m->pid > 0) {
 			if (kill_pid(m->pid))
-				log_err("Error killing '%s' with pid (%d)",
+				logv_err("Error killing '%s' with pid (%d)",
 						m->mod_name, m->pid);
 			else
 				log_info("'%s' shutdown complete", m->mod_name);
 		}
 	}
 	if (close(manager.listen_sock) < 0)
-		log_err("Error closing manager listen socket");
+		logv_err("Error closing manager listen socket");
 	if (unlink(MANAGER_SOCK_PATH) < 0)
-		log_err("Error removing manager socket from fs");
+		logv_err("Error removing manager socket from fs");
 	log_info("Manager shutdown complete.");
 	exit(0);
 }
@@ -526,12 +528,12 @@ static int setup_sig_handlers(void)
 	act.sa_handler = child_death_handler;
 	act.sa_mask = to_ignore;
 	if (sigaction(SIGCHLD, &act, NULL) < 0)
-		return -1;
+		diev("Error setting SIGCHLD handler");
 
 	memset(&act, 0, sizeof(act));
 	act.sa_handler = term_handler;
 	if (sigaction(SIGTERM, &act, NULL) < 0)
-		return -1;
+		diev("Error setting SIGTERM handler");
 	return 0;
 }
 
@@ -547,9 +549,14 @@ static void __restart_mods(void)
 
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
+		int j;
+
+		if (!m->needs_restart)
+			continue;
 
 		log_info("%s has died with code (%d) attempting to restart",
 				m->mod_name, m->wstatus);
+
 		if (manager.status == STARTING) {
 			log_err("%s failed on manager startup!", m->mod_name);
 			m->needs_restart = 0;
@@ -558,6 +565,13 @@ static void __restart_mods(void)
 
 		if (manager.status == STOPPED)
 			return;
+
+		for (j = 0; j < NUM_MODS; j++) {
+			if (!strcmp(manager.mod_pipes[j].mod_name, m->mod_name)) {
+				manager.mod_pipes[j].mod_name = NULL;
+				manager.mod_pipes[j].pipefd = 0;
+			}
+		}
 
 		/* Keep retrying to init the module */
 		while (m->needs_restart) {
@@ -588,11 +602,8 @@ static void __restart_mods(void)
  */
 static void restart_mods(void)
 {
-	/* Do not let other children dying interrupt us */
 	block_sigchld_interrupt();
 	__restart_mods();
-
-	/* Reenable child death interrupts */
 	manager.mods_need_restart = 0;
 	unblock_sigchld_interrupt();
 }
@@ -664,7 +675,7 @@ static void read_socket(void)
 	cfd = accept(manager.listen_sock, NULL, NULL);
 	if (cfd < 0) {
 		if (errno != EINTR)
-			log_err("Error while trying to accept sock connection.");
+			logv_err("Error while trying to accept sock connection.");
 		return;
 	}
 
@@ -678,7 +689,7 @@ static void read_socket(void)
 	 */
 	nr = read(cfd, buffer, sizeof(buffer) - 1);
 	if (nr <= 0) {
-		log_err("Error while reading from sock connection.");
+		logv_err("Error while reading from sock connection.");
 		goto done;
 	}
 	buffer[nr] = '\0';
@@ -697,7 +708,7 @@ static void read_socket(void)
 	}
 done:
 	if (close(cfd) < 0)
-		log_err("Error attempting to close sock connection.");
+		logv_err("Error attempting to close sock connection.");
 
 }
 
@@ -731,6 +742,7 @@ static void start_manager_loop(void)
 	struct pollfd fds[NUM_MODS + 1];
 	int i;
 
+reconfigure:
 	for (i = 0; i < NUM_MODS; i++) {
 		fds[i].fd = manager.mod_pipes[i].pipefd;
 		fds[i].events = POLLIN;
@@ -741,18 +753,21 @@ static void start_manager_loop(void)
 	while (manager.status == RUNNING) {
 		int readyfd;
 
-		if (manager.mods_need_restart)
+		if (manager.mods_need_restart) {
 			restart_mods();
+			goto reconfigure;
+		}
 
 		readyfd = poll(fds, NUM_MODS + 1, -1);
 		if (readyfd < 0) {
 			if (errno != EINTR)
-				log_err("poll fail");
+				logv_err("poll fail");
 			continue;
 		}
 
 		for (i = 0; i < ARRAY_SIZE(fds); i++) {
 			if (fds[i].revents & POLLIN) {
+				log_info("poll triggered on %d", fds[i].fd);
 				if (fds[i].fd == manager.listen_sock)
 					read_socket();
 				else
@@ -808,8 +823,7 @@ int main(int argc, char **argv)
 	 * When we are here we are daemonized and ready to start spinning up
 	 * bots and servers and such.
 	 */
-	if (setup_sig_handlers() < 0)
-		die("Error setting up signal handlers.");
+	setup_sig_handlers();
 	if (should_init_bot && do_init_module(&ts_bot))
 		return 1;
 	if (should_init_server && do_init_module(&ts_webserver))
