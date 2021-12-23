@@ -49,6 +49,12 @@
 #define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
 #define WEBSERVER_PATH "./tswebserver"
 #define BOT_PATH "./bot.py"
+#ifndef USERNAME
+# define USERNAME ""
+#endif
+#ifndef PASSWORD
+# define PASSWORD ""
+#endif
 
 #define MAX_CMD_LEN 4096
 #define LOG_BUF_SIZE (1 << 13)
@@ -122,8 +128,6 @@ static struct {
 	} mod_pipes[NUM_MODS];
 } manager;
 
-
-
 struct module {
 	/* pathname & argv - args to be used for exec() calls */
 	const char *mod_name;
@@ -147,7 +151,7 @@ static void init_ts_bot(void);
 static struct module ts_bot = {
 	.mod_name = "ts_bot",
 	.pathname = "/usr/bin/python",
-	.argv = {"python", BOT_PATH, NULL},
+	.argv = {"python", BOT_PATH, USERNAME, PASSWORD, NULL},
 	.pid = -1,
 	.init = &init_ts_bot,
 	.num_fails = 0,
@@ -192,12 +196,17 @@ static void do_log(int log_flags, const char *fmt, ...)
 
 	va_start(argp, fmt);
 	nw = vsnprintf(buffer, LOG_BUF_SIZE, fmt, argp);
-	va_end(argp);
+	if (nw < 0 || nw >= LOG_BUF_SIZE) {
+		nw = sizeof(buffer) - 1;
+		goto log_fail;
+	}
+
 	if (flags & LOG_ERRNO)
 		nw += snprintf(buffer + nw, LOG_BUF_SIZE - nw, " - %s",
 							strerror(errv));
+log_fail:
+	va_end(argp);
 	buffer[nw] = '\n';
-
 	write(STDOUT_FILENO, buffer, nw + 1);
 	if (flags & LOG_FATAL)
 		exit(1);
@@ -566,6 +575,7 @@ static void __restart_mods(void)
 		if (manager.status == STOPPED)
 			return;
 
+disable_pipe:
 		for (j = 0; j < NUM_MODS; j++) {
 			if (!strcmp(manager.mod_pipes[j].mod_name, m->mod_name)) {
 				manager.mod_pipes[j].mod_name = NULL;
@@ -577,7 +587,7 @@ static void __restart_mods(void)
 		while (m->needs_restart) {
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
 				if (do_init_module(m))
-					continue;
+					goto disable_pipe;
 			} else {
 				log_err("%s failed too many times. "
 					"Leaving off", m->mod_name);
@@ -643,9 +653,13 @@ static enum manager_cmds manager_process_input(const char *input)
 static void read_mod_input(int fd, const char *mod_name)
 {
 	char buf[2048];
-	int nr, bytes_left = sizeof(buf);
+	int nr, nw, bytes_left;
 
-	bytes_left -= sprintf(buf, "[%s] ", mod_name);
+	nw = snprintf(buf, sizeof(buf), "[%s] ", mod_name);
+	if (nw < 0 || nw >= sizeof(buf))
+		log_err("%s: %s module name is too long?", __func__, mod_name);
+
+	bytes_left = sizeof(buf) - nw;
 	while ((nr = read(fd, buf + sizeof(buf) - bytes_left, bytes_left)) > 0) {
 		bytes_left -= nr;
 		if (!bytes_left) {
@@ -767,7 +781,6 @@ reconfigure:
 
 		for (i = 0; i < ARRAY_SIZE(fds); i++) {
 			if (fds[i].revents & POLLIN) {
-				log_info("poll triggered on %d", fds[i].fd);
 				if (fds[i].fd == manager.listen_sock)
 					read_socket();
 				else
