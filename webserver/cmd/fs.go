@@ -13,9 +13,9 @@ const (
 )
 
 type FileChannel struct {
-	ChannelName     string
-	ChannelFilePath string
-	ChannelID       int64
+	ChannelName     string `json:"channel_name"`
+	ChannelFilePath string `json:"channel_file_path"`
+	ChannelID       int64 `json:"channel_id"`
 }
 
 var ServerFiles = make(map[string]FileChannel)
