@@ -117,7 +117,7 @@ func listenForMessages(c *conn, f *os.File) error {
 				serverMsg += word + " "
 			}
 
-			logMsg(time.UnixDate, onlyMsg)
+			logMsg(time.UnixDate, serverMsg)
 			ServerMsgChan <- serverMsg
 
 		}

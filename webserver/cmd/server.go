@@ -11,6 +11,7 @@ import (
 	"time"
 	"tswebserver/cmd/clienttime"
 	"tswebserver/cmd/tsc"
+	"tswebserver/cmd/config"
 )
 
 const (
@@ -54,6 +55,7 @@ var upgrader = websocket.Upgrader{
 var clients = make(map[*websocket.Conn]bool)
 var broadcast = make(chan ClientChatMessage)
 var tsconn *tsc.TSConn = nil
+var connLogFile *os.File = nil
 
 
 // 8/10/2021
@@ -79,7 +81,18 @@ func fileDownloadHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func indexHandler(w http.ResponseWriter, r *http.Request) {
+	if connLogFile == nil {
+		var err error
+		connLogFile, err = os.OpenFile("connections.txt", os.O_CREATE | os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	req := "." + r.URL.Path
+	_, err := connLogFile.Write([]byte("Request: " + r.RemoteAddr + "\n"))
+	if err != nil {
+		log.Printf("Failed to write to file for req: %s", r.RemoteAddr)
+	}
 	if req == "./" {
 		p := indexPage{
 			ClientTimeEntries: clienttime.BuildClientTimes(),
@@ -191,6 +204,7 @@ func handleMessages() {
 func StartServer() {
 	var err error
 
+	config.LoadConfiguration()
 	tsconn, err = tsc.ConnectToServer()
 	if err != nil {
 		log.Fatal(err)
@@ -201,9 +215,13 @@ func StartServer() {
 	http.HandleFunc("/ws", handleConnections)
 
 	go handleMessages()
-	go tsc.PushClientList(tsconn)
-	go tsc.ListenToServerMessages()
-	if err := http.ListenAndServe(":8081", nil); err != nil {
+	if config.Config.ClientListConf.Enabled {
+		go tsc.PushClientList(tsconn)
+	}
+	if config.Config.ServerMessaging.Enabled {
+		go tsc.ListenToServerMessages()
+	}
+	if err := http.ListenAndServeTLS(":8081", "server.crt", "server.key", nil); err != nil {
 		log.Fatal(err)
 	}
 }

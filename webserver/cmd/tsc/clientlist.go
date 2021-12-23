@@ -2,6 +2,7 @@ package tsc
 
 import (
 	"time"
+	"log"
 )
 
 const (
@@ -23,6 +24,7 @@ func PushClientList(tsconn *TSConn) {
 		chanClientMap, err := tsconn.buildChannelClientMap()
 		if err != nil {
 			// TODO: Push an error to the client
+			log.Print(err)
 			time.Sleep(clientListSocketTimeout)
 			continue
 		}

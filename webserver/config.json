@@ -1,0 +1,22 @@
+{
+	"clienttime": {
+		"enabled": "true",
+		"prog": "C",
+		"exe": "./../ltc/old_ltc/ltc"
+	},
+
+	"clientlist": {
+		"enabled": "true"
+	},
+
+	"servermessages": {
+		"enabled": "true"
+	},
+
+	"credentials": {
+		"username": "",
+		"password": "",
+		"ip": "localhost",
+		"port": "10011"
+	}
+}

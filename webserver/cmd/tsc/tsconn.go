@@ -4,15 +4,12 @@ import (
 	"bufio"
 	"github.com/multiplay/go-ts3"
 	"net"
+	"tswebserver/cmd/config"
 	"strings"
 )
 
-const (
-	username = ""
-	password = ""
-	ip       = ""
-	port     = ""
-)
+var username, password, ip, port string
+var initalized bool = false
 
 type TSConn struct {
 	Conn *ts3.Client
@@ -41,6 +38,13 @@ func ScanLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
 }
 
 func ConnectToServer() (*TSConn, error) {
+	if !initalized {
+		username = config.Config.Credentials.Username
+		password = config.Config.Credentials.Password
+		ip = config.Config.Credentials.IP
+		port = config.Config.Credentials.Port
+		initalized = true
+	}
 	c, err := ts3.NewClient(ip + ":" + port)
 	if err != nil {
 		return nil, err

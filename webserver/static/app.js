@@ -6,7 +6,7 @@ const ChatSend = document.getElementById("chat-send")
 /* Use this to change the pulsing message (Motd.innerText = [message]) */
 const Motd = document.getElementById("motd")
 
-let socket = new WebSocket("ws://" + document.location.host + "/ws");
+let socket = new WebSocket("wss://" + document.location.host + "/ws");
 let debug = false
 
 ChatInput.addEventListener("keypress", event => {

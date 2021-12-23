@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"tswebserver/cmd/config"
 )
 
 const (
@@ -13,17 +14,26 @@ const (
 	cLtcExe = "./../ltc/old_ltc/ltc"
 	logsDir = "./../logs"
 	numClients = 13
-	prog = "C"
 )
+
+type timeConfig struct {
+	enabled bool
+	prog string
+	exe string
+}
 
 type ClientTimeEntry struct {
 	TotalTime  uint64
 	ClientName string
 }
 
+
+
 func fetchClientTime() string {
 	var stdout bytes.Buffer
 	var cmd *exec.Cmd
+	prog := config.Config.ClientTimeConf.Prog
+
 
 	if prog == "C" {
 		clientsToPrint := strconv.Itoa(numClients)
@@ -39,8 +49,11 @@ func fetchClientTime() string {
 
 func BuildClientTimes() []ClientTimeEntry {
 	var entries []ClientTimeEntry = nil
-	times := strings.Split(fetchClientTime(), "\n")
+	if !config.Config.ClientTimeConf.Enabled {
+		return make([]ClientTimeEntry, 0)
+	}
 
+	times := strings.Split(fetchClientTime(), "\n")
 	for i, line := range times {
 		if i >= 13 {
 			break
