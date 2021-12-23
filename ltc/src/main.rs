@@ -3,8 +3,7 @@ use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 use std::env;
 use std::fs::{self, File};
-use std::io::prelude::*;
-use std::io::BufReader;
+use std::io::{prelude::*, BufReader};
 
 /*
  * struct client - keeps track of important connection information and
@@ -67,7 +66,7 @@ struct ClientDatabase {
 }
 
 impl ClientDatabase {
-    fn new() -> ClientDatabase {
+    fn new() -> Self {
         let map: HashMap<u32, Client> = HashMap::new();
         ClientDatabase { map }
     }
@@ -77,6 +76,11 @@ impl ClientDatabase {
      * if they joined under some new alias
      */
     fn log_connect(&mut self, id: u32, name: &str, time: i64) {
+        if id <= 1 {
+            // Ignore serveradmin
+            return;
+        }
+
         let mut client = match self.map.get_mut(&id) {
             Some(c) => c,
             None => {
@@ -126,6 +130,10 @@ impl ClientDatabase {
      * 	(client) : disconnected
      */
     fn log_disconnect(&mut self, id: u32, time: i64) {
+        if id <= 1 {
+            return;
+        }
+
         let mut client = match self.map.get_mut(&id) {
             Some(c) => c,
             None => {
@@ -152,17 +160,14 @@ impl ClientDatabase {
             c.last_time_connected = 0;
         }
     }
-}
 
-fn sort_and_print_client_times(db: ClientDatabase) {
-    let mut clients: Vec<Client> = db.map.into_iter().map(|(_id, c)| c).collect();
-    /*
-     * Sort the clients in reverse order to make it easier for it to be parsed
-     * when the output is picked up by the webserver
-     */
-    clients.sort_by(|a, b| b.total_time_connected.cmp(&a.total_time_connected));
-    for c in clients.iter() {
-        println!("{}\t{}", c.total_time_connected, c.name);
+    fn sort_and_print_client_times(self) {
+        let mut clients: Vec<Client> = self.map.into_iter().map(|(_id, c)| c).collect();
+
+        clients.sort_by(|a, b| b.total_time_connected.cmp(&a.total_time_connected));
+        for c in clients.iter() {
+            println!("{}\t{}", c.total_time_connected, c.name);
+        }
     }
 }
 
@@ -282,10 +287,25 @@ fn compile_logs(log_dir: &str) -> Result<BinaryHeap<LogFile>, std::io::Error> {
     Ok(bh)
 }
 
+fn usage(prog: &str) {
+    let prog_name = match prog.rfind('/') {
+        Some(i) => &prog[i+1..],
+        None => prog
+    };
+    println!(
+        "Usage: {} [log directory]",
+        prog_name
+    );
+    std::process::exit(0);
+}
+
 fn main() {
     let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        usage(&args[0]);
+    }
     let logs = compile_logs(&args[1]).unwrap();
     let mut client_db = ClientDatabase::new();
     parse_file_list(logs, &mut client_db).expect("Failed to parse file list");
-    sort_and_print_client_times(client_db);
+    client_db.sort_and_print_client_times();
 }
