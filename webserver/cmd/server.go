@@ -205,11 +205,13 @@ func StartServer() {
 	var err error
 
 	config.LoadConfiguration()
-	tsconn, err = tsc.ConnectToServer()
-	if err != nil {
-		log.Fatal(err)
+	if config.Config.ServerConnection.Enabled {
+		tsconn, err = tsc.ConnectToServer()
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer tsconn.CloseConn()
 	}
-	defer tsconn.CloseConn()
 
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", handleConnections)

@@ -31,6 +31,10 @@ type ServerConfig struct {
 		IP string	`json:"ip"`
 		Port string	`json:port"`
 	} `json:"credentials"`
+
+	ServerConnection struct {
+		Enabled bool `json:"enabled,string"`
+	} `json:"serverconnection"`
 }
 
 var Config ServerConfig

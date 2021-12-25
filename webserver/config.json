@@ -1,4 +1,8 @@
 {
+	"serverconnection": {
+		"enabled": "true"
+	},
+
 	"clienttime": {
 		"enabled": "true",
 		"prog": "C",
