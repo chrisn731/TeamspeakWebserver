@@ -1,0 +1,12 @@
+manager
+
+logs/
+
+ltc/old_ltc/ltc
+ltc/target
+
+
+webserver/connections.txt
+webserver/tswebserver
+webserver/config.json
+webserver/chathistory.txt
