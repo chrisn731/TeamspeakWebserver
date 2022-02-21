@@ -5,19 +5,47 @@
 
 import ts3
 import time
+import datetime
 import sys
 import os
 import subprocess
 import sqlite3
 import random
+import json
 from fuzzywuzzy import fuzz
 from fuzzywuzzy import process
 
 SID = 1
 # Must be edited to suit your workstation.
-URI = ""
-FILE_DIR = ""
+FILE_DIR = "/home/chrisnap/Backups/.tsbak/files/virtualserver_1/"
 SAYINGS_DIR = "./sayings/"
+
+class BotCredentials:
+    def __init__(self, credential_path):
+        self.__load_credentials(credential_path)
+
+    def __load_credentials(self, credential_path):
+        try:
+            with open(credential_path, 'r') as f:
+                self.__creds = json.loads(f.read())
+        except OSError as e:
+            print(e)
+            print("Ensure that the credential file exists!")
+            exit(1)
+        except JSONDecodeError as e:
+            print(e)
+            print("Ensure that the file is formatted correctly!")
+            exit(1)
+
+        if not "username" in self.__creds or not "password" in self.__creds:
+            print("Ensure that %s follows this format:" % (credential_path))
+            print("{ \"username\": \"your_login\", \"password\": \"your_pass\"}")
+
+    def get_username(self):
+        return self.__creds["username"]
+
+    def get_password(self):
+        return self.__creds["password"]
 
 # Teamspeak Connection Class
 # A nice wrapper around some of the commonly used commands to stop from
@@ -205,17 +233,18 @@ def do_ltc(data):
         return
 
     try:
-        date = datetime.strptime(tokens[1], "%m-%d-%Y")
+        date = datetime.datetime.strptime(tokens[1], "%m-%d-%Y")
     except ValueError:
         # This is raised if the message given does not follow the MM-DD-YYYY format.
         tsconn.global_msg("Usage: !ltc -d MM-DD-YYYY")
         return
 
-    p = subprocess.run(['../stats/ltc', '-d', tokens[1], "../stats/logs"],
+    p = subprocess.run(['./ltc/old_ltc/ltc', '-d', tokens[1], "./logs"],
                                     capture_output=True, text=True)
     if p.returncode != 0:
         tsconn.global_msg("Usage: !ltc -d MM-DD-YYYY")
         return
+
     for line in p.stdout.splitlines():
         tsconn.global_msg(line)
 
@@ -266,20 +295,28 @@ def start():
                 person = tokenized[1]
                 say(person)
 
-            elif "!cd" == command:
-                data = {
-                    "time": tokenized[1],
-                    "user": event[0]["invokername"]
-                }
-                countdown(data)
+           # elif "!cd" == command:
+           #     data = {
+           #         "time": tokenized[1],
+           #         "user": event[0]["invokername"]
+           #     }
+           #     countdown(data)
             elif "!ltc" == command:
                 data = {
                     "tokens": tokenized[1:],
                     "user": event[0]["invokername"]
                 }
                 do_ltc(data)
+            elif "!timeout" == command:
+                pass
 
 if __name__ == "__main__":
+    uri_fmt = "telnet://{login}:{password}@localhost:10011"
+
+    bc = BotCredentials("./bot_creds.json")
+    name = bc.get_username()
+    password = bc.get_password()
+    URI = uri_fmt.format(login=name, password=password)
     with ts3.query.TS3ServerConnection(URI) as server_connection:
         tsconn = tsc(server_connection)
         start()
