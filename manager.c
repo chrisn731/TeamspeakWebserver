@@ -27,6 +27,7 @@
  * 		Probably best if done in child_death_handler()
  *
  */
+
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -49,21 +50,9 @@
 #define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
 #define WEBSERVER_PATH "./tswebserver"
 #define BOT_PATH "./bot.py"
-#ifndef USERNAME
-# define USERNAME ""
-#endif
-#ifndef PASSWORD
-# define PASSWORD ""
-#endif
 
 #define MAX_CMD_LEN 4096
 #define LOG_BUF_SIZE (1 << 13)
-
-#define NOTREACHED() \
-	do {								\
-		die("Not reached denoted line reached in %s : %d",	\
-				__func__, __LINE__);			\
-	} while (0)
 
 #ifndef SUN_LEN
 # define SUN_LEN(su) \
@@ -72,22 +61,26 @@
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #define NUM_MODS 2
 
-#define block_sigchld_interrupt() \
+#define intr_enable()							\
 	do {								\
-		sigset_t set;						\
-		/* Do not let other children dying interrupt us */	\
-		sigemptyset(&set);					\
-		sigaddset(&set, SIGCHLD);				\
-		sigprocmask(SIG_BLOCK, &set, NULL);			\
+		sigset_t __enable;					\
+		sigfillset(&__enable);					\
+		sigprocmask(SIG_UNBLOCK, &__enable, NULL);		\
 	} while (0)
 
+#define intr_save(flags) 				\
+	do {						\
+		sigset_t __s;				\
+		sigemptyset(&__s);			\
+		sigemptyset(&flags);			\
+		sigaddset(&__s, SIGCHLD);		\
+		sigaddset(&__s, SIGTERM);		\
+		sigprocmask(SIG_BLOCK, &__s, &flags);	\
+	} while (0)
 
-#define unblock_sigchld_interrupt()					\
+#define intr_restore(flags) 						\
 	do {								\
-		sigset_t set;						\
-		sigemptyset(&set);					\
-		sigaddset(&set, SIGCHLD);				\
-		sigprocmask(SIG_UNBLOCK, &set, NULL);			\
+		sigprocmask(SIG_SETMASK, &flags, NULL);			\
 	} while (0)
 
 enum manager_status {
@@ -95,6 +88,10 @@ enum manager_status {
 	RUNNING,
 	STOPPED,
 };
+
+#define MODULE_OFF 	0x0000
+#define MODULE_RUNNING	0x0001
+#define MODULE_DEAD	0x0002
 
 #define LOG_ERRNO	0x01
 #define LOG_INFO 	0x02
@@ -144,28 +141,27 @@ struct module {
 #define MAX_FAIL_FOR_STOP 5
 	unsigned int num_fails;
 	unsigned int needs_restart;
+	unsigned int state;
 	int wstatus;
 };
+#define DEFINE_MODULE(name, modname, init_func, path, ...)	\
+	static struct module name = {				\
+		.mod_name = modname,				\
+		.pathname = path,				\
+		.argv = { __VA_ARGS__, NULL},			\
+		.pid = -1,					\
+		.init = init_func,				\
+		.state = MODULE_OFF				\
+	}
 
 static void init_ts_bot(void);
-static struct module ts_bot = {
-	.mod_name = "ts_bot",
-	.pathname = "/usr/bin/python",
-	.argv = {"python", BOT_PATH, USERNAME, PASSWORD, NULL},
-	.pid = -1,
-	.init = &init_ts_bot,
-	.num_fails = 0,
-};
+DEFINE_MODULE(ts_bot, "ts_bot", &init_ts_bot, "/usr/bin/python",
+		"python", BOT_PATH);
 
 static void init_ts_webserver(void);
-static struct module ts_webserver = {
-	.mod_name = "ts_webserver",
-	.pathname = WEBSERVER_PATH,
-	.argv = {WEBSERVER_PATH, NULL},
-	.pid = -1,
-	.init = &init_ts_webserver,
-	.num_fails = 0,
-};
+DEFINE_MODULE(ts_webserver, "ts_webserver", &init_ts_webserver,
+		WEBSERVER_PATH, WEBSERVER_PATH);
+
 static struct module *mods[NUM_MODS] = { &ts_bot, &ts_webserver };
 
 static char __log_buf[LOG_BUF_SIZE];
@@ -236,6 +232,20 @@ static void __noreturn init_ts_webserver(void)
 }
 
 /*
+ * Remove all signal handlers. This is mainly only used by new child proceeses.
+ */
+static void teardown_sighands(void)
+{
+	struct sigaction del = {
+		.sa_handler = SIG_DFL,
+	};
+	if (sigaction(SIGTERM, &del, NULL) < 0 ||
+	    sigaction(SIGCHLD, &del, NULL) < 0)
+		logv_err("Failed to teardown signal handlers!");
+
+}
+
+/*
  * do_init_module - fork and attempt to initialize module
  *
  * This function calls prctl() (which is linux specific BTW) so that our
@@ -247,6 +257,7 @@ static void __noreturn init_ts_webserver(void)
  */
 static int do_init_module(struct module *mod)
 {
+	sigset_t flags;
 	int cpid, i, pipefds[2];
 
 	log_info("Attempting to start up '%s'", mod->mod_name);
@@ -266,6 +277,7 @@ static int do_init_module(struct module *mod)
 	manager.mod_pipes[i].pipefd = pipefds[0];
 	manager.mod_pipes[i].mod_name = mod->mod_name;
 
+	intr_save(flags);
 	cpid = fork();
 	switch (cpid) {
 	case -1:
@@ -291,6 +303,9 @@ static int do_init_module(struct module *mod)
 					__func__, mod->mod_name);
 			_exit(1);
 		}
+		teardown_sighands();
+		/* Completely restore all interrupts */
+		intr_enable();
 		mod->init(); /* DOES NOT RETURN */
 		die("%s init function should not return", mod->mod_name);
 		break;
@@ -298,7 +313,9 @@ static int do_init_module(struct module *mod)
 		break;
 	}
 	/* From here on is the manager */
+	mod->state = MODULE_RUNNING;
 	mod->pid = cpid;
+	intr_restore(flags);
 	if (close(pipefds[1]) < 0)
 		logv_err("Failed to close write end of pipe for '%s'",
 						mod->mod_name);
@@ -329,10 +346,11 @@ static void child_death_handler(int signum)
 	while ((dead_child = waitpid(-1, &status, WNOHANG)) > 0) {
 		for (i = 0; i < ARRAY_SIZE(mods); i++) {
 			struct module *mod = mods[i];
-			if (dead_child == mod->pid) {
+			if (dead_child == mod->pid && mod->state != MODULE_DEAD) {
+				mod->state = MODULE_DEAD;
 				mod->needs_restart = 1;
-				mod->wstatus = status;
 				mod->pid = -1;
+				mod->wstatus = status;
 				manager.mods_need_restart = 1;
 			}
 		}
@@ -406,9 +424,13 @@ static int setup_comm_socket(void)
 static void init_manager(void)
 {
 	struct stat st;
-	int nullfd;
+	int nullfd, i;
 
 	manager.status = STARTING;
+	for (i = 0; i < NUM_MODS; i++) {
+		manager.mod_pipes[i].pipefd = 0;
+		manager.mod_pipes[i].mod_name = "";
+	}
 	if (!stat(MANAGER_SOCK_PATH, &st))
 		diev("Manager already running.");
 	init_manager_log_file();
@@ -458,18 +480,33 @@ static void send_command(const char *arg)
 }
 
 /*
- * Kill wrapper to terminate children of the manager.
- * First attempts to be kind and terminate them. If that does not work
- * sends a SIGKILL as last resort.
+ * Cleanup and exit a finished module.
+ * Finished means it either willingly exited, or it died.
  */
-static int kill_pid(int pid)
+static void do_module_exit(struct module *m)
 {
-	int err;
+	const char *mod_name = m->mod_name;
+	int i;
 
-	err = kill(pid, SIGTERM);
-	if (err)
-		err = kill(pid, SIGKILL);
-	return err;
+	if (m->state == MODULE_OFF)
+		return;
+
+	if (m->state == MODULE_RUNNING) {
+		m->state = MODULE_DEAD;
+		if (kill(m->pid, SIGTERM))
+			kill(m->pid, SIGKILL);
+		m->pid = -1;
+	}
+
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!strcmp(manager.mod_pipes[i].mod_name, mod_name)) {
+			if (close(manager.mod_pipes[i].pipefd) < 0)
+				logv_err("Error closing read pipe for module: %s", mod_name);
+			manager.mod_pipes[i].mod_name = "";
+			manager.mod_pipes[i].pipefd = 0;
+			break;
+		}
+	}
 }
 
 /*
@@ -483,24 +520,12 @@ static int kill_pid(int pid)
 static void __noreturn shutdown_manager(void)
 {
 	int i;
-	struct sigaction act = {
-		.sa_handler = SIG_DFL
-	};
+	sigset_t flags;
 
-	/* We are going to be killing children. Ignore SIGCHLD. */
-	if (sigaction(SIGCHLD, &act, NULL) < 0)
-		logv_err("Error reseting child death handler.");
-
+	intr_save(flags);
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
-
-		if (m->pid > 0) {
-			if (kill_pid(m->pid))
-				logv_err("Error killing '%s' with pid (%d)",
-						m->mod_name, m->pid);
-			else
-				log_info("'%s' shutdown complete", m->mod_name);
-		}
+		do_module_exit(m);
 	}
 	if (close(manager.listen_sock) < 0)
 		logv_err("Error closing manager listen socket");
@@ -546,6 +571,8 @@ static int setup_sig_handlers(void)
 	return 0;
 }
 
+
+
 /*
  * __restart_mods - attempts to startup modules marked in need of a restart
  *
@@ -558,7 +585,6 @@ static void __restart_mods(void)
 
 	for (i = 0; i < ARRAY_SIZE(mods); i++) {
 		struct module *m = mods[i];
-		int j;
 
 		if (!m->needs_restart)
 			continue;
@@ -575,30 +601,28 @@ static void __restart_mods(void)
 		if (manager.status == STOPPED)
 			return;
 
-disable_pipe:
-		for (j = 0; j < NUM_MODS; j++) {
-			if (!strcmp(manager.mod_pipes[j].mod_name, m->mod_name)) {
-				manager.mod_pipes[j].mod_name = NULL;
-				manager.mod_pipes[j].pipefd = 0;
-			}
-		}
-
 		/* Keep retrying to init the module */
-		while (m->needs_restart) {
+		for (;;) {
+			sigset_t flags;
+			intr_save(flags);
+			/* Have the module exit its current state before restarting it */
+			do_module_exit(m);
+			intr_restore(flags);
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
-				if (do_init_module(m))
-					goto disable_pipe;
+				if (!do_init_module(m))
+					break;
 			} else {
 				log_err("%s failed too many times. "
 					"Leaving off", m->mod_name);
+				break;
 			}
-			/*
-			 * We either failed too many times or the module is
-			 * alive. Either way, we are done fiddling with this
-			 * module.
-			 */
-			m->needs_restart = 0;
 		}
+		/*
+		 * We either failed too many times or the module is
+		 * alive. Either way, we are done fiddling with this
+		 * module.
+		 */
+		m->needs_restart = 0;
 	}
 }
 
@@ -612,28 +636,17 @@ disable_pipe:
  */
 static void restart_mods(void)
 {
-	block_sigchld_interrupt();
+	sigset_t flags;
+	intr_save(flags);
 	__restart_mods();
 	manager.mods_need_restart = 0;
-	unblock_sigchld_interrupt();
+	intr_restore(flags);
 }
 
 
 static void req_restart_mod(const char *req_mod)
 {
-	int i;
 
-	block_sigchld_interrupt();
-	for (i = 0; i < ARRAY_SIZE(mods); i++) {
-		struct module *m = mods[i];
-
-		if (!strcmp(m->mod_name, req_mod)) {
-			kill_pid(m->pid);
-			m->pid = -1;
-		}
-		__restart_mods();
-	}
-	unblock_sigchld_interrupt();
 }
 
 /* New manager commands should be added to this enum */
@@ -663,11 +676,14 @@ static void read_mod_input(int fd, const char *mod_name)
 	while ((nr = read(fd, buf + sizeof(buf) - bytes_left, bytes_left)) > 0) {
 		bytes_left -= nr;
 		if (!bytes_left) {
+			/* Flush */
 			write(STDOUT_FILENO, buf, sizeof(buf));
 			bytes_left = sizeof(buf);
 		}
 	}
-	if (bytes_left != sizeof(buf)) {
+	/* bytes_left can not be 0 here */
+	if (bytes_left < sizeof(buf)) {
+		/* Final flush, also ensure that we have newlines */
 		char *lf = memchr(buf, '\n', sizeof(buf));
 		if (!lf)
 			buf[sizeof(buf) - bytes_left--] = '\n';
@@ -726,6 +742,26 @@ done:
 
 }
 
+static int setup_poll_fds(struct pollfd *fds, size_t size)
+{
+	int i, open_mods = 0;
+
+	memset(fds, 0, size);
+	for (i = 0; i < NUM_MODS; i++) {
+		struct pollfd *f = &fds[open_mods];
+		if (manager.mod_pipes[i].pipefd) {
+			f->fd = manager.mod_pipes[i].pipefd;
+			f->events = POLLIN;
+			open_mods++;
+		}
+	}
+	log_info("poll will have %d open mods", open_mods);
+	fds[open_mods].fd = manager.listen_sock;
+	fds[open_mods].events = POLLIN;
+	open_mods++;
+	return open_mods;
+}
+
 /*
  * Main manager loop.
  *
@@ -754,32 +790,27 @@ done:
 static void start_manager_loop(void)
 {
 	struct pollfd fds[NUM_MODS + 1];
-	int i;
+	int num_mods_running;
 
-reconfigure:
-	for (i = 0; i < NUM_MODS; i++) {
-		fds[i].fd = manager.mod_pipes[i].pipefd;
-		fds[i].events = POLLIN;
-	}
-	fds[i].fd = manager.listen_sock;
-	fds[i].events = POLLIN;
-
+	num_mods_running = setup_poll_fds(fds, sizeof(fds));
 	while (manager.status == RUNNING) {
-		int readyfd;
+		int readyfd, i;
 
 		if (manager.mods_need_restart) {
 			restart_mods();
-			goto reconfigure;
+			/* Module states have changed, update our poller */
+			num_mods_running = setup_poll_fds(fds, sizeof(fds));
+			continue;
 		}
 
-		readyfd = poll(fds, NUM_MODS + 1, -1);
+		readyfd = poll(fds, num_mods_running, -1);
 		if (readyfd < 0) {
 			if (errno != EINTR)
 				logv_err("poll fail");
 			continue;
 		}
 
-		for (i = 0; i < ARRAY_SIZE(fds); i++) {
+		for (i = 0; i < num_mods_running; i++) {
 			if (fds[i].revents & POLLIN) {
 				if (fds[i].fd == manager.listen_sock)
 					read_socket();
@@ -790,7 +821,6 @@ reconfigure:
 		}
 	}
 	shutdown_manager();
-	NOTREACHED();
 }
 
 int main(int argc, char **argv)
