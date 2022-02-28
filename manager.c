@@ -42,6 +42,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #define __noreturn __attribute__((__noreturn__))
@@ -89,9 +90,16 @@ enum manager_status {
 	STOPPED,
 };
 
-#define MODULE_OFF 	0x0000
-#define MODULE_RUNNING	0x0001
+#define MODULE_RUNNING	0x0000
+#define MODULE_OFF 	0x0001
 #define MODULE_DEAD	0x0002
+#define MODULE_EXITED	0x0004
+
+#define MODULE_INACTIVE (MODULE_OFF | MODULE_DEAD | MODULE_EXITED)
+#define MODULE_PARKED (MODULE_OFF | MODULE_EXITED)
+#define module_is_running(m) ((m)->state == MODULE_RUNNING)
+#define module_is_inactive(m) ((m)->state & MODULE_INACTIVE)
+#define module_is_parked(m) ((m)->state & MODULE_PARKED)
 
 #define LOG_ERRNO	0x01
 #define LOG_INFO 	0x02
@@ -123,6 +131,7 @@ static struct {
 		const char *mod_name;
 		int pipefd;
 	} mod_pipes[NUM_MODS];
+	struct tm *startup_time;
 } manager;
 
 struct module {
@@ -144,9 +153,9 @@ struct module {
 	unsigned int state;
 	int wstatus;
 };
-#define DEFINE_MODULE(name, modname, init_func, path, ...)	\
+#define DEFINE_MODULE(name, init_func, path, ...)		\
 	static struct module name = {				\
-		.mod_name = modname,				\
+		.mod_name = #name,				\
 		.pathname = path,				\
 		.argv = { __VA_ARGS__, NULL},			\
 		.pid = -1,					\
@@ -155,12 +164,10 @@ struct module {
 	}
 
 static void init_ts_bot(void);
-DEFINE_MODULE(ts_bot, "ts_bot", &init_ts_bot, "/usr/bin/python",
-		"python", BOT_PATH);
+DEFINE_MODULE(ts_bot, &init_ts_bot, "/usr/bin/python", "python", BOT_PATH);
 
 static void init_ts_webserver(void);
-DEFINE_MODULE(ts_webserver, "ts_webserver", &init_ts_webserver,
-		WEBSERVER_PATH, WEBSERVER_PATH);
+DEFINE_MODULE(ts_webserver, &init_ts_webserver, WEBSERVER_PATH, WEBSERVER_PATH);
 
 static struct module *mods[NUM_MODS] = { &ts_bot, &ts_webserver };
 
@@ -192,6 +199,7 @@ static void do_log(int log_flags, const char *fmt, ...)
 
 	va_start(argp, fmt);
 	nw = vsnprintf(buffer, LOG_BUF_SIZE, fmt, argp);
+	va_end(argp);
 	if (nw < 0 || nw >= LOG_BUF_SIZE) {
 		nw = sizeof(buffer) - 1;
 		goto log_fail;
@@ -201,7 +209,6 @@ static void do_log(int log_flags, const char *fmt, ...)
 		nw += snprintf(buffer + nw, LOG_BUF_SIZE - nw, " - %s",
 							strerror(errv));
 log_fail:
-	va_end(argp);
 	buffer[nw] = '\n';
 	write(STDOUT_FILENO, buffer, nw + 1);
 	if (flags & LOG_FATAL)
@@ -298,9 +305,13 @@ static int do_init_module(struct module *mod)
 		}
 		/* This fd is now useless */
 		close(pipefds[1]);
-		if (prctl(PR_SET_PDEATHSIG, SIGHUP) < 0) {
+		if (prctl(PR_SET_PDEATHSIG, SIGTERM) < 0) {
 			logv_err("%s: '%s' failed to do prctl()\n",
 					__func__, mod->mod_name);
+			_exit(1);
+		}
+		if (!mod->init) {
+			log_err("%s has no init function!!", mod->mod_name);
 			_exit(1);
 		}
 		teardown_sighands();
@@ -346,7 +357,7 @@ static void child_death_handler(int signum)
 	while ((dead_child = waitpid(-1, &status, WNOHANG)) > 0) {
 		for (i = 0; i < ARRAY_SIZE(mods); i++) {
 			struct module *mod = mods[i];
-			if (dead_child == mod->pid && mod->state != MODULE_DEAD) {
+			if (dead_child == mod->pid && module_is_running(mod)) {
 				mod->state = MODULE_DEAD;
 				mod->needs_restart = 1;
 				mod->pid = -1;
@@ -357,13 +368,6 @@ static void child_death_handler(int signum)
 	}
 	if (dead_child < 0)
 		logv_err("Failed to wait for stopped child.");
-}
-
-
-/* Make sure that the commands we are going to send are correct */
-static inline int sanitize_command(const char *cmd)
-{
-	return strcmp(cmd, "stop");
 }
 
 /*
@@ -424,9 +428,12 @@ static int setup_comm_socket(void)
 static void init_manager(void)
 {
 	struct stat st;
+	time_t t;
 	int nullfd, i;
 
 	manager.status = STARTING;
+	time(&t);
+	manager.startup_time = localtime(&t);
 	for (i = 0; i < NUM_MODS; i++) {
 		manager.mod_pipes[i].pipefd = 0;
 		manager.mod_pipes[i].mod_name = "";
@@ -447,66 +454,38 @@ static void init_manager(void)
 }
 
 /*
- * send_command - send a command to the daemonized manager
- */
-static void send_command(const char *arg)
-{
-	struct sockaddr_un sa;
-	struct stat st;
-	int fd;
-	size_t cmd_len;
-
-	if (stat(MANAGER_SOCK_PATH, &st) < 0)
-		diev("Manager not currently running");
-
-	cmd_len = strlen(arg);
-	if (cmd_len > MAX_CMD_LEN)
-		die("%s is longer than the max command length", arg);
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0)
-		diev("Error creating socket file descriptor");
-
-	sa.sun_family = AF_LOCAL;
-	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
-	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
-
-	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		diev("Error connecting: Ensure that the manager is currently running");
-	if (write(fd, arg, cmd_len) != cmd_len)
-		diev("Error writing to socket.");
-	if (close(fd) < 0)
-		diev("Error closing socket fd");
-}
-
-/*
  * Cleanup and exit a finished module.
  * Finished means it either willingly exited, or it died.
  */
 static void do_module_exit(struct module *m)
 {
-	const char *mod_name = m->mod_name;
+	sigset_t flags;
 	int i;
 
-	if (m->state == MODULE_OFF)
+	/* Nothing to do */
+	if (module_is_parked(m))
 		return;
 
+	intr_save(flags);
 	if (m->state == MODULE_RUNNING) {
-		m->state = MODULE_DEAD;
 		if (kill(m->pid, SIGTERM))
 			kill(m->pid, SIGKILL);
+		m->state = MODULE_DEAD;
 		m->pid = -1;
 	}
+	intr_restore(flags);
 
 	for (i = 0; i < NUM_MODS; i++) {
-		if (!strcmp(manager.mod_pipes[i].mod_name, mod_name)) {
+		if (!strcmp(manager.mod_pipes[i].mod_name, m->mod_name)) {
 			if (close(manager.mod_pipes[i].pipefd) < 0)
-				logv_err("Error closing read pipe for module: %s", mod_name);
+				logv_err("Error closing read pipe for module: %s",
+						m->mod_name);
 			manager.mod_pipes[i].mod_name = "";
 			manager.mod_pipes[i].pipefd = 0;
 			break;
 		}
 	}
+	m->state = MODULE_EXITED;
 }
 
 /*
@@ -551,7 +530,7 @@ static void term_handler(int sign)
  * 		    is stopping, then all the processes it is managing should
  * 		    also stop.
  */
-static int setup_sig_handlers(void)
+static int init_sighands(void)
 {
 	struct sigaction act;
 	sigset_t to_ignore;
@@ -570,8 +549,6 @@ static int setup_sig_handlers(void)
 		diev("Error setting SIGTERM handler");
 	return 0;
 }
-
-
 
 /*
  * __restart_mods - attempts to startup modules marked in need of a restart
@@ -603,11 +580,8 @@ static void __restart_mods(void)
 
 		/* Keep retrying to init the module */
 		for (;;) {
-			sigset_t flags;
-			intr_save(flags);
 			/* Have the module exit its current state before restarting it */
 			do_module_exit(m);
-			intr_restore(flags);
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
 				if (!do_init_module(m))
 					break;
@@ -646,7 +620,16 @@ static void restart_mods(void)
 
 static void req_restart_mod(const char *req_mod)
 {
+	int i;
 
+	for (i = 0; i < NUM_MODS; i++) {
+		struct module *m = mods[i];
+		if (!strcmp(m->mod_name, req_mod)) {
+			m->needs_restart = 1;
+			manager.mods_need_restart = 1;
+			return;
+		}
+	}
 }
 
 /* New manager commands should be added to this enum */
@@ -654,40 +637,60 @@ enum manager_cmds {
 	CMD_NONE,
 	CMD_SHUTDOWN,
 	CMD_RESTART_MOD,
+	CMD_DISABLE_MOD,
+	CMD_ENABLE_MOD,
 };
 
 static enum manager_cmds manager_process_input(const char *input)
 {
-	if (!strcmp(input, "stop"))
+	const char *sep;
+	size_t cmd_len;
+
+	sep = strchr(input, ' ');
+	if (!sep)
+		sep = strchr(input, '\0');
+
+	cmd_len = sep - input;
+	if (!strncmp(input, "stop", cmd_len))
 		return CMD_SHUTDOWN;
+	if (!strncmp(input, "restart", cmd_len))
+		return CMD_RESTART_MOD;
+	if (!strncmp(input, "disable", cmd_len))
+		return CMD_DISABLE_MOD;
+	if (!strncmp(input, "enable", cmd_len))
+		return CMD_ENABLE_MOD;
 	return CMD_NONE;
 }
 
 static void read_mod_input(int fd, const char *mod_name)
 {
 	char buf[2048];
-	int nr, nw, bytes_left;
+	int nr, nw, bytes_left, buf_len;
 
-	nw = snprintf(buf, sizeof(buf), "[%s] ", mod_name);
-	if (nw < 0 || nw >= sizeof(buf))
+	buf_len = sizeof(buf);
+	memset(buf, 0, buf_len);
+	nw = snprintf(buf, buf_len, "[%s] ", mod_name);
+	if (nw < 0 || nw >= buf_len) {
 		log_err("%s: %s module name is too long?", __func__, mod_name);
+		nw = snprintf(buf, buf_len, "[???] ");
+	}
 
-	bytes_left = sizeof(buf) - nw;
-	while ((nr = read(fd, buf + sizeof(buf) - bytes_left, bytes_left)) > 0) {
+	bytes_left = buf_len - nw;
+	while ((nr = read(fd, buf + buf_len - bytes_left, bytes_left)) > 0) {
 		bytes_left -= nr;
 		if (!bytes_left) {
 			/* Flush */
-			write(STDOUT_FILENO, buf, sizeof(buf));
-			bytes_left = sizeof(buf);
+			write(STDOUT_FILENO, buf, buf_len);
+			bytes_left = buf_len;
 		}
 	}
 	/* bytes_left can not be 0 here */
-	if (bytes_left < sizeof(buf)) {
+	if (bytes_left < buf_len) {
 		/* Final flush, also ensure that we have newlines */
-		char *lf = memchr(buf, '\n', sizeof(buf));
+		char *lf = memchr(buf, '\n', buf_len);
 		if (!lf)
-			buf[sizeof(buf) - bytes_left--] = '\n';
-		write(STDOUT_FILENO, buf, sizeof(buf) - bytes_left);
+			buf[buf_len - bytes_left--] = '\n';
+		write(STDOUT_FILENO, buf, buf_len - bytes_left);
 	}
 }
 
@@ -728,12 +731,9 @@ static void read_socket(void)
 	case CMD_SHUTDOWN:
 		manager.status = STOPPED;
 		break;
-	case CMD_RESTART_MOD:
-		// TODO Finish this
-		//req_restart_mod(strstr(buffer, "restart") + strlen("restart "));
-		break;
 	case CMD_NONE:
 	default:
+		log_info("Received: %s", buffer);
 		break;
 	}
 done:
@@ -823,6 +823,128 @@ static void start_manager_loop(void)
 	shutdown_manager();
 }
 
+/* Make sure that the commands we are going to send are correct */
+static inline int sanitize_command(const char *cmd)
+{
+	if (!strcmp(cmd, "stop"))
+		return 0;
+	if (!strcmp(cmd, "enable") ||
+	    !strcmp(cmd, "disable") ||
+	    !strcmp(cmd, "restart"))
+		return 1;
+	if (!strcmp(cmd, "test2"))
+		return 2;
+	return -1;
+}
+
+/*
+ * send_command - send a command to the daemonized manager
+ */
+static void send_command(const char *arg)
+{
+	struct sockaddr_un sa;
+	struct stat st;
+	int fd;
+	size_t cmd_len;
+
+	if (stat(MANAGER_SOCK_PATH, &st) < 0)
+		diev("Manager not currently running");
+
+	cmd_len = strlen(arg);
+	if (cmd_len > MAX_CMD_LEN)
+		die("%s is longer than the max command length", arg);
+
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		diev("Error creating socket file descriptor");
+
+	sa.sun_family = AF_LOCAL;
+	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
+	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
+
+	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
+		diev("Error connecting: Ensure that the manager is currently running");
+	if (write(fd, arg, cmd_len) != cmd_len)
+		diev("Error writing to socket.");
+	if (close(fd) < 0)
+		diev("Error closing socket fd");
+}
+
+static void build_message(char *b, const char **args, int num_extra)
+{
+	char *const end = b + MAX_CMD_LEN;
+
+	b += snprintf(b, end - b, "%s", *args++);
+	while (b < end && num_extra--)
+		b += snprintf(b, end - b, " %s", *args++);
+	if (b >= end)
+		die("Inputted command is too long!");
+}
+
+static int try_send(const char **args, int optidx)
+{
+	/* optidx is the index of the NEXT arg, so -1 so we stay on target */
+	const char **send_args = &args[optidx - 1];
+	char *msg;
+	int num_extra;
+
+	if (!*send_args)
+		return -1;
+
+	/*
+	 * send_args[0] -> The command/operation
+	 * send_args[1..] -> Any extra arguments for that operation
+	 */
+	num_extra = sanitize_command(*send_args);
+	if (num_extra < 0)
+		return -1;
+
+	msg = malloc(MAX_CMD_LEN);
+	if (!msg)
+		diev("malloc() error");
+	build_message(msg, send_args, num_extra);
+	send_command(msg);
+	free(msg);
+	return 0;
+}
+
+static void start_interactive(void)
+{
+	struct pollfd fd = {
+		.fd = STDOUT_FILENO,
+		.events = POLLIN,
+	};
+	struct stat st;
+	const char *prompt = "[manager]$ ";
+	char buf[4096];
+	size_t prompt_len;
+	int res;
+
+	if (stat(MANAGER_SOCK_PATH, &st) < 0)
+		diev("Manager not currently running");
+
+	/*
+	fd = socket(AF_UNIX, SOCK_STREAM, 0);
+	if (fd < 0)
+		diev("Error creating socket file descriptor.");
+
+	sa.sun_family = AF_LOCAL;
+	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
+	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
+
+	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
+		diev("Error connecting: Ensure that the manager is currently running");
+	*/
+	prompt_len = strlen(prompt);
+	do {
+		write(STDOUT_FILENO, prompt, prompt_len);
+		res = poll(&fd, 1, -1);
+		buf[read(STDIN_FILENO, buf, sizeof(buf) - 1) - 1] = '\0';
+		if (!strcmp(buf, "quit"))
+			break;
+	} while (res > 0);
+}
+
 int main(int argc, char **argv)
 {
 	int opt, should_init_bot = 0, should_init_server = 0;
@@ -831,7 +953,7 @@ int main(int argc, char **argv)
 	if (argc == 1)
 		usage(self_name);
 
-	while ((opt = getopt(argc, argv, "abs:S:w")) != -1) {
+	while ((opt = getopt(argc, argv, "abis:S:w")) != -1) {
 		switch (opt) {
 		case 'a':
 			should_init_server = 1;
@@ -840,11 +962,13 @@ int main(int argc, char **argv)
 		case 'b':
 			should_init_bot = 1;
 			break;
+		case 'i':
+			start_interactive();
+			return 0;
 		case 's':
 		case 'S':
-			if (sanitize_command(optarg))
+			if (try_send((const char **) argv, optind))
 				usage(self_name);
-			send_command(optarg);
 			return 0;
 		case 'w':
 			should_init_server = 1;
@@ -866,7 +990,7 @@ int main(int argc, char **argv)
 	 * When we are here we are daemonized and ready to start spinning up
 	 * bots and servers and such.
 	 */
-	setup_sig_handlers();
+	init_sighands();
 	if (should_init_bot && do_init_module(&ts_bot))
 		return 1;
 	if (should_init_server && do_init_module(&ts_webserver))
