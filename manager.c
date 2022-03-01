@@ -154,7 +154,7 @@ struct module {
 	int wstatus;
 };
 #define DEFINE_MODULE(name, init_func, path, ...)		\
-	static struct module name = {				\
+	struct module name = {					\
 		.mod_name = #name,				\
 		.pathname = path,				\
 		.argv = { __VA_ARGS__, NULL},			\
@@ -164,12 +164,15 @@ struct module {
 	}
 
 static void init_ts_bot(void);
-DEFINE_MODULE(ts_bot, &init_ts_bot, "/usr/bin/python", "python", BOT_PATH);
-
 static void init_ts_webserver(void);
-DEFINE_MODULE(ts_webserver, &init_ts_webserver, WEBSERVER_PATH, WEBSERVER_PATH);
 
-static struct module *mods[NUM_MODS] = { &ts_bot, &ts_webserver };
+static DEFINE_MODULE(ts_bot, &init_ts_bot, "/usr/bin/python", "python", BOT_PATH);
+static DEFINE_MODULE(ts_webserver, &init_ts_webserver, WEBSERVER_PATH, WEBSERVER_PATH);
+
+static struct module *mods[NUM_MODS] = {
+	&ts_bot,
+	&ts_webserver,
+};
 
 static char __log_buf[LOG_BUF_SIZE];
 

@@ -37,9 +37,13 @@ class BotCredentials:
             print("Ensure that the file is formatted correctly!")
             exit(1)
 
-        if not "username" in self.__creds or not "password" in self.__creds:
+        name = self.__creds.get("username", None)
+        passw = self.__creds.get("password", None)
+        # Validate input
+        if (not name or name == "" or not passw or passw == ""):
             print("Ensure that %s follows this format:" % (credential_path))
             print("{ \"username\": \"your_login\", \"password\": \"your_pass\"}")
+            exit(1)
 
     def get_username(self):
         return self.__creds["username"]
