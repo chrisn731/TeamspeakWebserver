@@ -4,36 +4,16 @@
  * The purpose of this is to manage and control the teamspeak bot
  * and webserver. It is able to automatically stop, restart, and
  * recover a crashed process.
- *
- * When spawed, it daemonizes itself and creates a socket in order to
- * receieve commands.
- *
- *
- *      init_manager()
- *           |
- *           v
- *      start_manager_loop() -> poll() -> read_mod_input()
- *           ^                     |            |
- *           |                     v            |
- *           |                read_socket()     |
- *           |                     |            |
- *           |_____________________|____________|
  */
 
-/*
- * TODO:
- * 	- If a child dies, manager still knows about it's pipe. Therefore,
- * 		the pipe of communication MUST be cleared when the child dies.
- * 		Probably best if done in child_death_handler()
- *
- */
-
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,23 +24,18 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include "client.h"
+#include "manager.h"
+#include "session.h"
 
 #define __noreturn __attribute__((__noreturn__))
 
 #define LOG_FILE_PATH "/tmp/ts_manager_log.txt"
-#define MANAGER_SOCK_PATH "/tmp/ts_manager_sock"
 #define WEBSERVER_PATH "./tswebserver"
 #define BOT_PATH "./bot.py"
 
-#define MAX_CMD_LEN 4096
 #define LOG_BUF_SIZE (1 << 13)
-
-#ifndef SUN_LEN
-# define SUN_LEN(su) \
-	(sizeof(*(su)) - sizeof((su)->sun_path) + strlen((su)->sun_path))
-#endif
-#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
-#define NUM_MODS 2
+#define MAN_POLL_TIMEOUT -1 /* In milliseconds, -1 for no tiemout */
 
 #define intr_enable()							\
 	do {								\
@@ -84,11 +59,6 @@
 		sigprocmask(SIG_SETMASK, &flags, NULL);			\
 	} while (0)
 
-enum manager_status {
-	STARTING,
-	RUNNING,
-	STOPPED,
-};
 
 #define MODULE_RUNNING	0x0000
 #define MODULE_OFF 	0x0001
@@ -110,29 +80,6 @@ enum manager_status {
 #define log_info(s, ...) do_log(LOG_INFO, "[INFO] " s, ## __VA_ARGS__)
 #define log_err(s, ...) do_log(LOG_ERR, "[ERR] " s, ## __VA_ARGS__)
 #define logv_err(s, ...) do_log(LOG_ERR | LOG_ERRNO, "[ERR] " s, ## __VA_ARGS__)
-
-/*
- * manager struct
- *
- * Keeps track of the state of the running manager.
- */
-static struct {
-	/* listen_sock - file descriptor for it's listening socket */
-	int listen_sock;
-
-	/*
-	 * running - is the manager currently running. 0 or 1 only
-	 * Marked as volatile because the value can be changed by the SIGTERM
-	 * signal handler.
-	 */
-	volatile enum manager_status status;
-	volatile unsigned int mods_need_restart;
-	struct {
-		const char *mod_name;
-		int pipefd;
-	} mod_pipes[NUM_MODS];
-	struct tm *startup_time;
-} manager;
 
 struct module {
 	/* pathname & argv - args to be used for exec() calls */
@@ -163,9 +110,10 @@ struct module {
 		.state = MODULE_OFF				\
 	}
 
+static struct manager manager;
+
 static void init_ts_bot(void);
 static void init_ts_webserver(void);
-
 static DEFINE_MODULE(ts_bot, &init_ts_bot, "/usr/bin/python", "python", BOT_PATH);
 static DEFINE_MODULE(ts_webserver, &init_ts_webserver, WEBSERVER_PATH, WEBSERVER_PATH);
 
@@ -192,6 +140,12 @@ static void usage(const char *self)
 	exit(1);
 }
 
+/*
+ * do_log - Print log string
+ *
+ * In this function we print to stdout, but the manager uses the
+ * stdout file descriptor as a log file
+ */
 static void do_log(int log_flags, const char *fmt, ...)
 {
 	va_list argp;
@@ -223,6 +177,7 @@ log_fail:
  */
 static void __noreturn init_ts_bot(void)
 {
+	chdir("..");
 	execv(ts_bot.pathname, ts_bot.argv);
 	logv_err("[BOT ERR] - failed to startup bot");
 	_exit(1);
@@ -233,7 +188,7 @@ static void __noreturn init_ts_bot(void)
  */
 static void __noreturn init_ts_webserver(void)
 {
-	if (chdir("./webserver") < 0)
+	if (chdir("./../webserver") < 0)
 		logv_err("Could not change into webserver directory.");
 	else
 		execv(ts_webserver.pathname, ts_webserver.argv);
@@ -256,7 +211,7 @@ static void teardown_sighands(void)
 }
 
 /*
- * do_init_module - fork and attempt to initialize module
+ * do_module_init - fork and attempt to initialize module
  *
  * This function calls prctl() (which is linux specific BTW) so that our
  * initialized module dies off if the manager were to unexpectedly die.
@@ -265,34 +220,40 @@ static void teardown_sighands(void)
  * it's children. This is so we can nicely write down what they are saying
  * in a better format than having them write it themselves.
  */
-static int do_init_module(struct module *mod)
+static int do_module_init(struct module *mod)
 {
 	sigset_t flags;
 	int cpid, i, pipefds[2];
 
 	log_info("Attempting to start up '%s'", mod->mod_name);
+	if (module_is_running(mod)) {
+		log_err("%s is already running!", mod->mod_name);
+		goto bad_init;
+	}
 	if (pipe(pipefds) < 0) {
 		logv_err("Failed to set up pipe for %s", mod->mod_name);
-		return -1;
+		goto bad_init;
 	}
 
-	for (i = 0; i < NUM_MODS && manager.mod_pipes[i].pipefd; i++)
-		;
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!manager.mod_pipes[i].pipefd) {
+			manager.mod_pipes[i].pipefd = pipefds[0];
+			manager.mod_pipes[i].mod_name = mod->mod_name;
+			break;
+		}
+	}
 	if (i >= NUM_MODS) {
 		log_err("%s: Manager has no open pipes for '%s' module!",
 				__func__, mod->mod_name);
-		return -1;
+		goto bad_init_cleanup_pipe;
 	}
-
-	manager.mod_pipes[i].pipefd = pipefds[0];
-	manager.mod_pipes[i].mod_name = mod->mod_name;
 
 	intr_save(flags);
 	cpid = fork();
 	switch (cpid) {
 	case -1:
 		logv_err("Failed to fork for %s", mod->mod_name);
-		return -1;
+		goto bad_init_cleanup_fork;
 	case 0:
 		/* We don't need that read end */
 		if (close(pipefds[0]) < 0) {
@@ -342,22 +303,39 @@ static int do_init_module(struct module *mod)
 		logv_err("Setting O_NONBLOCK on read end of pipe for '%s' failed!"
 			" Manager will for SURE not work as expected!",
 			mod->mod_name);
+	manager.mods_dirty = 1;
 	return 0;
+
+bad_init_cleanup_fork:
+	intr_restore(flags);
+bad_init_cleanup_pipe:
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!strcmp(manager.mod_pipes[i].mod_name, mod->mod_name)) {
+			manager.mod_pipes[i].pipefd = pipefds[0];
+			manager.mod_pipes[i].mod_name = "";
+			break;
+		}
+	}
+	for (i = 0; i < 2; i++)
+		close(pipefds[i]);
+bad_init:
+	return -1;
 }
 
 /*
- * TODO: Make init_bot && init_server reentrant so that
- * calling them from the signal handler is not unsafe. For
- * now, this will do.
+ * child_death_handler - cleanup after any dead modules
+ *
+ * Call on wait() to clean up after any modules that died. Then, mark them
+ * as needing a restart so the manager can try to get them back on their feet.
  */
 static void child_death_handler(int signum)
 {
 	pid_t dead_child;
-	int i, status = 0;
+	int status = 0;
 
-	(void) signum;
 	/* wait() on all dead children */
 	while ((dead_child = waitpid(-1, &status, WNOHANG)) > 0) {
+		int i;
 		for (i = 0; i < ARRAY_SIZE(mods); i++) {
 			struct module *mod = mods[i];
 			if (dead_child == mod->pid && module_is_running(mod)) {
@@ -365,7 +343,7 @@ static void child_death_handler(int signum)
 				mod->needs_restart = 1;
 				mod->pid = -1;
 				mod->wstatus = status;
-				manager.mods_need_restart = 1;
+				manager.mods_dirty = 1;
 			}
 		}
 	}
@@ -445,6 +423,9 @@ static void init_manager(void)
 		diev("Manager already running.");
 	init_manager_log_file();
 
+	if (init_session_handler(&manager) < 0)
+		diev("Error initalizing session handler!");
+
 	/* We successfully set up the log file, we don't need stdin anymore */
 	nullfd = open("/dev/null", O_RDWR);
 	if (nullfd < 0)
@@ -453,6 +434,8 @@ static void init_manager(void)
 		diev("Failed to redirect stdin to '/dev/null'");
 	if (daemon(1, 1) < 0)
 		diev("Error daemonizing");
+	if (close(nullfd) < 0)
+		log_err("Error closing nullfd");
 	manager.listen_sock = setup_comm_socket();
 }
 
@@ -476,6 +459,7 @@ static void do_module_exit(struct module *m)
 		m->state = MODULE_DEAD;
 		m->pid = -1;
 	}
+	manager.mods_dirty = 1;
 	intr_restore(flags);
 
 	for (i = 0; i < NUM_MODS; i++) {
@@ -495,20 +479,21 @@ static void do_module_exit(struct module *m)
  * Manager shutdown routine.
  *
  * Main steps:
- * 	1. Attempt to kindly TERMinate children (kill if stubborn)
- * 	2. Remove socket
- * 	3. exit()
+ * 	1. Disable interrupts.
+ * 	2. Exit all running modules
+ * 	3. Close and destroy the socket.
+ * 	4. exit() the manager
  */
 static void __noreturn shutdown_manager(void)
 {
-	int i;
 	sigset_t flags;
+	int i;
 
 	intr_save(flags);
-	for (i = 0; i < ARRAY_SIZE(mods); i++) {
-		struct module *m = mods[i];
-		do_module_exit(m);
-	}
+	close_session_handler(&manager);
+	for (i = 0; i < ARRAY_SIZE(mods); i++)
+		do_module_exit(mods[i]);
+
 	if (close(manager.listen_sock) < 0)
 		logv_err("Error closing manager listen socket");
 	if (unlink(MANAGER_SOCK_PATH) < 0)
@@ -586,7 +571,7 @@ static void __restart_mods(void)
 			/* Have the module exit its current state before restarting it */
 			do_module_exit(m);
 			if (++m->num_fails < MAX_FAIL_FOR_STOP) {
-				if (!do_init_module(m))
+				if (!do_module_init(m))
 					break;
 			} else {
 				log_err("%s failed too many times. "
@@ -616,24 +601,30 @@ static void restart_mods(void)
 	sigset_t flags;
 	intr_save(flags);
 	__restart_mods();
-	manager.mods_need_restart = 0;
+	manager.mods_dirty = 0;
 	intr_restore(flags);
 }
 
+/*
+ * do_module_restart - Restart a requested module
+ */
+static int do_module_restart(struct module *m)
+{
+	do_module_exit(m);
+	return do_module_init(m);
+}
 
-static void req_restart_mod(const char *req_mod)
+static struct module *get_mod(char *req_mod)
 {
 	int i;
-
 	for (i = 0; i < NUM_MODS; i++) {
 		struct module *m = mods[i];
-		if (!strcmp(m->mod_name, req_mod)) {
-			m->needs_restart = 1;
-			manager.mods_need_restart = 1;
-			return;
-		}
+		if (!strcmp(m->mod_name, req_mod))
+			return m;
 	}
+	return NULL;
 }
+
 
 /* New manager commands should be added to this enum */
 enum manager_cmds {
@@ -644,27 +635,73 @@ enum manager_cmds {
 	CMD_ENABLE_MOD,
 };
 
-static enum manager_cmds manager_process_input(const char *input)
+
+static enum manager_cmds parse_command(const char *input)
 {
-	const char *sep;
-	size_t cmd_len;
-
-	sep = strchr(input, ' ');
-	if (!sep)
-		sep = strchr(input, '\0');
-
-	cmd_len = sep - input;
-	if (!strncmp(input, "stop", cmd_len))
+	if (!strncmp(input, "stop", strlen("stop")))
 		return CMD_SHUTDOWN;
-	if (!strncmp(input, "restart", cmd_len))
+	if (!strncmp(input, "restart", strlen("restart")))
 		return CMD_RESTART_MOD;
-	if (!strncmp(input, "disable", cmd_len))
+	if (!strncmp(input, "disable", strlen("disable")))
 		return CMD_DISABLE_MOD;
-	if (!strncmp(input, "enable", cmd_len))
+	if (!strncmp(input, "enable", strlen("enable")))
 		return CMD_ENABLE_MOD;
 	return CMD_NONE;
 }
 
+const char *manager_process_input(char *input)
+{
+	enum manager_cmds cmd;
+	char *arg;
+	int errv = 1;
+
+	cmd = parse_command(input);
+	if (cmd == CMD_NONE)
+		return "Unknown command.";
+
+	if (cmd == CMD_SHUTDOWN) {
+		manager.status = STOPPED;
+		return "Shutting down...";
+	}
+
+	input = strchr(input, ' ');
+	if (!input)
+		return "No argument given.";
+	while ((arg = strsep(&input, " "))) {
+		struct module *m;
+		if (!*arg)
+			continue;
+
+		m = get_mod(arg);
+		if (!m)
+			continue;
+
+		switch (cmd) {
+		case CMD_RESTART_MOD:
+			errv = do_module_restart(m);
+			break;
+		case CMD_DISABLE_MOD:
+			do_module_exit(m);
+			errv = 0;
+			break;
+		case CMD_ENABLE_MOD:
+			errv = do_module_init(m);
+			break;
+		default:
+			die("%s made impossible switch on cmd val (%d)",
+					__func__, cmd);
+			break;
+		}
+	}
+	return !errv ? "OK" : "FAIL";
+}
+
+/*
+ * read_mod_input - Read output from a running module
+ *
+ * Take the output of the module and write it to the log file.
+ * Prepend the name of the module so we can distinguish who is talking.
+ */
 static void read_mod_input(int fd, const char *mod_name)
 {
 	char buf[2048];
@@ -698,71 +735,168 @@ static void read_mod_input(int fd, const char *mod_name)
 }
 
 /*
- * read_socket - read in socket content
- *
- * We only get here if the socket fd got triggered from the poll within
- * start_manager_loop()
+ * try_service_sock - Attempt to service the file descriptor as the listen sock
  */
-static void read_socket(void)
+static int try_service_socket(int fd)
 {
-	char buffer[MAX_CMD_LEN];
-	int cfd, nr;
-
-	cfd = accept(manager.listen_sock, NULL, NULL);
-	if (cfd < 0) {
-		if (errno != EINTR)
-			logv_err("Error while trying to accept sock connection.");
-		return;
+	if (fd == manager.listen_sock) {
+		start_new_session(&manager);
+		return 0;
 	}
-
-	/*
-	 * It's /techinically/ not really an error if read returns 0,
-	 * but if we did get 0 that means that the socket connection
-	 * was closed.
-	 *
-	 * Thus, if the connection was closed and we were expecting to
-	 * read some command we will just treat it as an error.
-	 */
-	nr = read(cfd, buffer, sizeof(buffer) - 1);
-	if (nr <= 0) {
-		logv_err("Error while reading from sock connection.");
-		goto done;
-	}
-	buffer[nr] = '\0';
-
-	switch (manager_process_input(buffer)) {
-	case CMD_SHUTDOWN:
-		manager.status = STOPPED;
-		break;
-	case CMD_NONE:
-	default:
-		log_info("Received: %s", buffer);
-		break;
-	}
-done:
-	if (close(cfd) < 0)
-		logv_err("Error attempting to close sock connection.");
-
+	return -1;
 }
 
-static int setup_poll_fds(struct pollfd *fds, size_t size)
+/*
+ * try_service_module - Attempt to service the file descriptor as a module
+ */
+static int try_service_module(int fd)
 {
-	int i, open_mods = 0;
+	int i;
 
-	memset(fds, 0, size);
 	for (i = 0; i < NUM_MODS; i++) {
-		struct pollfd *f = &fds[open_mods];
-		if (manager.mod_pipes[i].pipefd) {
-			f->fd = manager.mod_pipes[i].pipefd;
-			f->events = POLLIN;
-			open_mods++;
+		if (manager.mod_pipes[i].pipefd == fd) {
+			read_mod_input(fd, manager.mod_pipes[i].mod_name);
+			return 0;
 		}
 	}
-	log_info("poll will have %d open mods", open_mods);
-	fds[open_mods].fd = manager.listen_sock;
-	fds[open_mods].events = POLLIN;
-	open_mods++;
-	return open_mods;
+	return -1;
+}
+
+/*
+ * try_service_session - Attempt to service the file descriptor as a session
+ */
+static int try_service_session(int fd)
+{
+	struct session *s;
+
+	s = get_session_by_fd(&manager, fd);
+	if (!s)
+		return -1;
+	process_session(&manager, s);
+	return 0;
+}
+
+/*
+ * service_fds - Attempt to service any file descriptors marked ready by poll()
+ *
+ * Since poll() just marks which file descriptor was ready, we need to match it
+ * to a component of the manager (i.e. socket, module, or session).
+ */
+static void service_fds(struct pollfd *fds, int npoll, int nready)
+{
+	struct pollfd *fd;
+	int i;
+
+	for (i = 0, fd = fds; i < npoll && nready > 0; i++, fd++) {
+		int errv, readyfd = fd->fd;
+
+		if (!(fd->revents & POLLIN))
+			continue;
+		nready--;
+		errv = try_service_socket(readyfd);
+		if (!errv)
+			continue;
+		errv = try_service_module(readyfd);
+		if (!errv)
+			continue;
+		errv = try_service_session(readyfd);
+		if (!errv)
+			continue;
+
+		logv_err("Could not service fd (%d)!", readyfd);
+	}
+}
+
+/*
+ * setup_poll_fds - Prepare the poll() array of file descriptors
+ *
+ * We will poll() on:
+ * 	+ The listen socket file descriptor
+ * 	+ All module pipe file descriptors
+ * 	+ All currently running client sessions (interactive session)
+ */
+static int setup_poll_fds(struct pollfd **fds)
+{
+	struct session *s;
+	struct pollfd *p;
+	int len, i;
+
+	len = 1; /* Start at 1 for the listen sock */
+	len += manager.session_handler->num_sessions;
+	for (i = 0; i < NUM_MODS; i++) {
+		struct module *m = mods[i];
+		if (m->pid > 0)
+			len += 1;
+	}
+
+	p = calloc(len, sizeof(*p));
+	if (!p)
+		diev("malloc() error");
+	if (*fds)
+		free(*fds);
+	*fds = p;
+
+	/* Poll on the listen sock */
+	p->fd = manager.listen_sock;
+	p->events = POLLIN;
+	p++;
+
+	/* Poll on all the current sessions */
+	list_for_each_entry(s, &manager.session_handler->sessions, list) {
+		log_info("Adding session fd (%d) to poll", s->comm_fd);
+		p->fd = s->comm_fd;
+		p->events = POLLIN;
+		p++;
+	}
+
+	/* Poll the currently loaded mods */
+	for (i = 0; i < NUM_MODS; i++) {
+		if (manager.mod_pipes[i].pipefd) {
+			log_info("Adding module fd (%d) to poll", manager.mod_pipes[i].pipefd);
+			p->fd = manager.mod_pipes[i].pipefd;
+			p->events = POLLIN;
+			p++;
+		}
+	}
+	return len;
+}
+
+/*
+ * Check if the manager is "dirty".
+ * Shorthand word for that some state has changed that needs to be accounted for.
+ */
+static inline int manager_is_dirty(void)
+{
+	return manager.mods_dirty ||
+		manager.session_handler->sessions_dirty;
+}
+
+/*
+ * manager_cleanup_dirt - Cleanup the dirty states so we correctly poll.
+ *
+ * If the manager is "dirty" that means a state has chagned in which we need
+ * to account for. Most notably it needs to be accounted for in our call to
+ * poll(). Events that make the manager dirty:
+ * 	- starting or disabling modules
+ * 	- starting or stopping sessions (dirty sessions handled by session handler)
+ */
+static void manager_cleanup_dirt(void)
+{
+	sigset_t flags;
+
+	intr_save(flags);
+	restart_mods();
+	manager.session_handler->sessions_dirty = 0;
+	intr_restore(flags);
+}
+
+/*
+ * destory_poll_fds - Deallocate the array of poll file descriptors
+ */
+static void destroy_poll_fds(struct pollfd *fds)
+{
+	if (fds)
+		free(fds);
 }
 
 /*
@@ -775,177 +909,61 @@ static int setup_poll_fds(struct pollfd *fds, size_t size)
  * 	+ Have a working local Unix socket for IPC and receiving commands
  * 	+ Registered a child death signal handler
  *
- * Now enter an infinite loop that starts by calling accept() and waiting
- * for a command or event to come up. If a child dies, we *temporarily* leave
- * the main loop to restart any dead modules. After that procedure is finished
- * we reenable the manager.
+ * Next step is to setup poll(). We call on setup_poll_fds() to populate
+ * our array of file descriptors, then poll().
+ *
+ * If poll() returns a ready file descriptor, we move on to service it.
  *
  * Important things to remember:
- *  - accept() is BLOCKING therefore as soon as we come into here the manager
- *  will be put to sleep by the kernel until a connection to its socket is
- *  attempted. Therefore, there should be little to no stress on the cpu from
- *  the manager.
- *
  *  - We could possbily halt the execution of this loop from an event. More
  *  specifically, if a child process was to die. Therefore it is imperative
  *  to make sure that system calls being made handle EINTR - see errno(3).
  */
 static void start_manager_loop(void)
 {
-	struct pollfd fds[NUM_MODS + 1];
-	int num_mods_running;
+	struct pollfd *fds = NULL;
+	int nfds;
 
-	num_mods_running = setup_poll_fds(fds, sizeof(fds));
+	nfds = setup_poll_fds(&fds);
 	while (manager.status == RUNNING) {
-		int readyfd, i;
+		int readyfd;
 
-		if (manager.mods_need_restart) {
-			restart_mods();
-			/* Module states have changed, update our poller */
-			num_mods_running = setup_poll_fds(fds, sizeof(fds));
+		/* Check for any state change */
+		if (manager_is_dirty()) {
+			manager_cleanup_dirt();
+			nfds = setup_poll_fds(&fds);
 			continue;
 		}
 
-		readyfd = poll(fds, num_mods_running, -1);
+		readyfd = poll(fds, nfds, MAN_POLL_TIMEOUT);
+		if (!readyfd)
+			continue;
 		if (readyfd < 0) {
 			if (errno != EINTR)
 				logv_err("poll fail");
 			continue;
 		}
 
-		for (i = 0; i < num_mods_running; i++) {
-			if (fds[i].revents & POLLIN) {
-				if (fds[i].fd == manager.listen_sock)
-					read_socket();
-				else
-					read_mod_input(fds[i].fd,
-						manager.mod_pipes[i].mod_name);
-			}
-		}
+		service_fds(fds, nfds, readyfd);
 	}
+	destroy_poll_fds(fds);
 	shutdown_manager();
 }
 
-/* Make sure that the commands we are going to send are correct */
-static inline int sanitize_command(const char *cmd)
-{
-	if (!strcmp(cmd, "stop"))
-		return 0;
-	if (!strcmp(cmd, "enable") ||
-	    !strcmp(cmd, "disable") ||
-	    !strcmp(cmd, "restart"))
-		return 1;
-	if (!strcmp(cmd, "test2"))
-		return 2;
-	return -1;
-}
-
 /*
- * send_command - send a command to the daemonized manager
+ * Maybe I am missing something, but I personally think that SIGPIPE default
+ * behavior of killing your program is just silly. Why does it not just return
+ * -1 and set errno? Anyways, in the case of the manager and manager client, we
+ * want this to be ignored.
  */
-static void send_command(const char *arg)
+static void disable_sigpipe(void)
 {
-	struct sockaddr_un sa;
-	struct stat st;
-	int fd;
-	size_t cmd_len;
-
-	if (stat(MANAGER_SOCK_PATH, &st) < 0)
-		diev("Manager not currently running");
-
-	cmd_len = strlen(arg);
-	if (cmd_len > MAX_CMD_LEN)
-		die("%s is longer than the max command length", arg);
-
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0)
-		diev("Error creating socket file descriptor");
-
-	sa.sun_family = AF_LOCAL;
-	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
-	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
-
-	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		diev("Error connecting: Ensure that the manager is currently running");
-	if (write(fd, arg, cmd_len) != cmd_len)
-		diev("Error writing to socket.");
-	if (close(fd) < 0)
-		diev("Error closing socket fd");
-}
-
-static void build_message(char *b, const char **args, int num_extra)
-{
-	char *const end = b + MAX_CMD_LEN;
-
-	b += snprintf(b, end - b, "%s", *args++);
-	while (b < end && num_extra--)
-		b += snprintf(b, end - b, " %s", *args++);
-	if (b >= end)
-		die("Inputted command is too long!");
-}
-
-static int try_send(const char **args, int optidx)
-{
-	/* optidx is the index of the NEXT arg, so -1 so we stay on target */
-	const char **send_args = &args[optidx - 1];
-	char *msg;
-	int num_extra;
-
-	if (!*send_args)
-		return -1;
-
-	/*
-	 * send_args[0] -> The command/operation
-	 * send_args[1..] -> Any extra arguments for that operation
-	 */
-	num_extra = sanitize_command(*send_args);
-	if (num_extra < 0)
-		return -1;
-
-	msg = malloc(MAX_CMD_LEN);
-	if (!msg)
-		diev("malloc() error");
-	build_message(msg, send_args, num_extra);
-	send_command(msg);
-	free(msg);
-	return 0;
-}
-
-static void start_interactive(void)
-{
-	struct pollfd fd = {
-		.fd = STDOUT_FILENO,
-		.events = POLLIN,
+	struct sigaction sa = {
+		.sa_handler = SIG_IGN,
 	};
-	struct stat st;
-	const char *prompt = "[manager]$ ";
-	char buf[4096];
-	size_t prompt_len;
-	int res;
 
-	if (stat(MANAGER_SOCK_PATH, &st) < 0)
-		diev("Manager not currently running");
-
-	/*
-	fd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (fd < 0)
-		diev("Error creating socket file descriptor.");
-
-	sa.sun_family = AF_LOCAL;
-	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
-	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
-
-	if (connect(fd, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		diev("Error connecting: Ensure that the manager is currently running");
-	*/
-	prompt_len = strlen(prompt);
-	do {
-		write(STDOUT_FILENO, prompt, prompt_len);
-		res = poll(&fd, 1, -1);
-		buf[read(STDIN_FILENO, buf, sizeof(buf) - 1) - 1] = '\0';
-		if (!strcmp(buf, "quit"))
-			break;
-	} while (res > 0);
+	if (sigaction(SIGPIPE, &sa, NULL) < 0)
+		diev("Error disabling SIGPIPE");
 }
 
 int main(int argc, char **argv)
@@ -956,6 +974,7 @@ int main(int argc, char **argv)
 	if (argc == 1)
 		usage(self_name);
 
+	disable_sigpipe();
 	while ((opt = getopt(argc, argv, "abis:S:w")) != -1) {
 		switch (opt) {
 		case 'a':
@@ -994,9 +1013,9 @@ int main(int argc, char **argv)
 	 * bots and servers and such.
 	 */
 	init_sighands();
-	if (should_init_bot && do_init_module(&ts_bot))
+	if (should_init_bot && do_module_init(&ts_bot))
 		return 1;
-	if (should_init_server && do_init_module(&ts_webserver))
+	if (should_init_server && do_module_init(&ts_webserver))
 		return 1;
 
 	manager.status = RUNNING;
