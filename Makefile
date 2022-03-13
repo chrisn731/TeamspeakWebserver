@@ -6,7 +6,7 @@ WEBSERVER_DIR = ./webserver
 all: manager webserver ltc
 	$(info Done.)
 
-manager: manager.c
+manager:
 	$(MAKE) -C $(MAN_DIR)
 	mv $(MAN_DIR)/manager .
 

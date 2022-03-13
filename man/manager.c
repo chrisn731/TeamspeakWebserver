@@ -177,7 +177,6 @@ log_fail:
  */
 static void __noreturn init_ts_bot(void)
 {
-	chdir("..");
 	execv(ts_bot.pathname, ts_bot.argv);
 	logv_err("[BOT ERR] - failed to startup bot");
 	_exit(1);
@@ -188,7 +187,7 @@ static void __noreturn init_ts_bot(void)
  */
 static void __noreturn init_ts_webserver(void)
 {
-	if (chdir("./../webserver") < 0)
+	if (chdir("./webserver") < 0)
 		logv_err("Could not change into webserver directory.");
 	else
 		execv(ts_webserver.pathname, ts_webserver.argv);
@@ -776,6 +775,15 @@ static int try_service_session(int fd)
 	return 0;
 }
 
+static void early_module_startup(int bot, int server)
+{
+	if (bot)
+		do_module_init(&ts_bot);
+	if (server)
+		do_module_init(&ts_webserver);
+}
+
+
 /*
  * service_fds - Attempt to service any file descriptors marked ready by poll()
  *
@@ -1013,11 +1021,7 @@ int main(int argc, char **argv)
 	 * bots and servers and such.
 	 */
 	init_sighands();
-	if (should_init_bot && do_module_init(&ts_bot))
-		return 1;
-	if (should_init_server && do_module_init(&ts_webserver))
-		return 1;
-
+	early_module_startup(should_init_bot, should_init_server);
 	manager.status = RUNNING;
 	start_manager_loop();
 	return 0;

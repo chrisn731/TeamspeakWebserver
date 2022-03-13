@@ -202,24 +202,9 @@ static int wait_next_command(int sock)
  */
 void start_interactive(void)
 {
-	struct stat st;
-	struct sockaddr_un sa;
 	int sock, errv;
 
-	if (stat(MANAGER_SOCK_PATH, &st) < 0)
-		die("Manager not currently running");
-
-	sock = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sock < 0)
-		die("Error creating socket file descriptor.");
-
-	sa.sun_family = AF_LOCAL;
-	strncpy(sa.sun_path, MANAGER_SOCK_PATH, sizeof(sa.sun_path));
-	sa.sun_path[sizeof(sa.sun_path) - 1] = '\0';
-
-	if (connect(sock, (struct sockaddr *) &sa, SUN_LEN(&sa)) < 0)
-		die("Error connecting: Ensure that the manager is currently running");
-
+	sock = connect_to_manager();
 	do {
 		errv = wait_next_command(sock);
 	} while (!errv);
