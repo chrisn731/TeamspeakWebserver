@@ -12,6 +12,7 @@ import (
 	"tswebserver/cmd/clienttime"
 	"tswebserver/cmd/tsc"
 	"tswebserver/cmd/config"
+	"tswebserver/cmd/elights"
 )
 
 const (
@@ -216,6 +217,7 @@ func StartServer() {
 	http.HandleFunc("/", indexHandler)
 	http.HandleFunc("/ws", handleConnections)
 
+	elights.SetupEvanLights()
 	go handleMessages()
 	if config.Config.ClientListConf.Enabled {
 		go tsc.PushClientList(tsconn)

@@ -27,8 +27,6 @@ type ClientTimeEntry struct {
 	ClientName string
 }
 
-
-
 func fetchClientTime() string {
 	var stdout bytes.Buffer
 	var cmd *exec.Cmd
@@ -55,7 +53,7 @@ func BuildClientTimes() []ClientTimeEntry {
 
 	times := strings.Split(fetchClientTime(), "\n")
 	for i, line := range times {
-		if i >= 13 {
+		if i >= numClients {
 			break
 		}
 
