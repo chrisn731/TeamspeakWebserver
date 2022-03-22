@@ -99,7 +99,6 @@ struct module {
 	unsigned int needs_restart;
 	unsigned int state;
 	int wstatus;
-	int pipefd;
 };
 #define DEFINE_MODULE(name, init_func, path, ...)		\
 	struct module name = {					\
@@ -107,10 +106,22 @@ struct module {
 		.pathname = path,				\
 		.argv = { __VA_ARGS__, NULL},			\
 		.pid = -1,					\
-		.pipefd = -1,					\
 		.init = init_func,				\
 		.state = MODULE_OFF				\
 	}
+
+/* Is this better? Do we like pointers better than '.' reference? */
+#define DEFINE_MODULE_BETTER(name, init_func, path, ...) 	\
+	struct module __ ## name = {				\
+		.mod_name = #name,				\
+		.pathname = path,				\
+		.argv = { __VA_ARGS__, NULL},			\
+		.pid = -1,					\
+		.init = init_func,				\
+		.state = MODULE_OFF,				\
+	};							\
+	static struct module * name = &__ ## name
+
 
 static struct manager manager;
 
@@ -235,7 +246,19 @@ static int do_module_init(struct module *mod)
 		logv_err("Failed to set up pipe for %s", mod->mod_name);
 		goto bad_init;
 	}
-	mod->pipefd = pipefds[0];
+
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!manager.mod_pipes[i].pipefd) {
+			manager.mod_pipes[i].pipefd = pipefds[0];
+			manager.mod_pipes[i].mod_name = mod->mod_name;
+			break;
+		}
+	}
+	if (i >= NUM_MODS) {
+		log_err("%s: Manager has no open pipes for '%s' module!",
+				__func__, mod->mod_name);
+		goto bad_init_cleanup_pipe;
+	}
 
 	intr_save(flags);
 	cpid = fork();
@@ -297,7 +320,14 @@ static int do_module_init(struct module *mod)
 
 bad_init_cleanup_fork:
 	intr_restore(flags);
-	mod->pipefd = -1;
+bad_init_cleanup_pipe:
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!strcmp(manager.mod_pipes[i].mod_name, mod->mod_name)) {
+			manager.mod_pipes[i].pipefd = 0;
+			manager.mod_pipes[i].mod_name = "";
+			break;
+		}
+	}
 	for (i = 0; i < 2; i++)
 		close(pipefds[i]);
 bad_init:
@@ -392,11 +422,15 @@ static void init_manager(void)
 {
 	struct stat st;
 	time_t t;
-	int nullfd;
+	int nullfd, i;
 
 	manager.status = STARTING;
 	time(&t);
 	manager.startup_time = localtime(&t);
+	for (i = 0; i < NUM_MODS; i++) {
+		manager.mod_pipes[i].pipefd = 0;
+		manager.mod_pipes[i].mod_name = "";
+	}
 	if (!stat(MANAGER_SOCK_PATH, &st))
 		diev("Manager already running.");
 	init_manager_log_file();
@@ -424,6 +458,7 @@ static void init_manager(void)
 static void do_module_exit(struct module *m)
 {
 	sigset_t flags;
+	int i;
 
 	/* Nothing to do */
 	if (module_is_parked(m))
@@ -439,10 +474,16 @@ static void do_module_exit(struct module *m)
 	manager.mods_dirty = 1;
 	intr_restore(flags);
 
-	if (close(m->pipefd) < 0)
-		logv_err("Error closing read pipe for module: %s",
-				m->mod_name);
-	m->pipefd = -1;
+	for (i = 0; i < NUM_MODS; i++) {
+		if (!strcmp(manager.mod_pipes[i].mod_name, m->mod_name)) {
+			if (close(manager.mod_pipes[i].pipefd) < 0)
+				logv_err("Error closing read pipe for module: %s",
+						m->mod_name);
+			manager.mod_pipes[i].mod_name = "";
+			manager.mod_pipes[i].pipefd = 0;
+			break;
+		}
+	}
 	m->state = MODULE_EXITED;
 }
 
@@ -725,8 +766,8 @@ static int try_service_module(int fd)
 	int i;
 
 	for (i = 0; i < NUM_MODS; i++) {
-		if (fd == mods[i]->pipefd) {
-			read_mod_input(fd, mods[i]->mod_name);
+		if (manager.mod_pipes[i].pipefd == fd) {
+			read_mod_input(fd, manager.mod_pipes[i].mod_name);
 			return 0;
 		}
 	}
@@ -831,10 +872,9 @@ static int setup_poll_fds(struct pollfd **fds)
 
 	/* Poll the currently loaded mods */
 	for (i = 0; i < NUM_MODS; i++) {
-		if (mods[i]->pipefd > 0) {
-			log_info("Adding module '%s' to poll with fd (%d)",
-					mods[i]->mod_name, mods[i]->pipefd);
-			p->fd = mods[i]->pipefd;
+		if (manager.mod_pipes[i].pipefd) {
+			log_info("Adding module fd (%d) to poll", manager.mod_pipes[i].pipefd);
+			p->fd = manager.mod_pipes[i].pipefd;
 			p->events = POLLIN;
 			p++;
 		}

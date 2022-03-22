@@ -47,18 +47,6 @@ struct manager {
 
 	/* startup_time - The time the manager started up */
 	struct tm *startup_time;
-
-	/*
-	 * Array of pipes to modules.
-	 * Note: These pipes are READ ONLY
-	 */
-	struct {
-		/* The name of the mod on the other side */
-		const char *mod_name;
-
-		/* The file descriptor of the pipe */
-		int pipefd;
-	} mod_pipes[NUM_MODS];
 };
 
 /* Only here to expose functionality to the session_handler */
