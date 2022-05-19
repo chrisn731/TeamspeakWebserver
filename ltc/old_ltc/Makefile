@@ -1,11 +1,12 @@
-CC = gcc
-CFLAGS = -O2
+CCX = g++
 
-all: ltc.c list_sorter.c
-	$(CC) $(CFLAGS) $^ -o ltc
+FLAGS = -Wall -O2
+OUT = ltc
 
-debug: ltc.c list_sorter.c
-	$(CC) -Wall $^ -o ltc_debug
+all: ltc.cpp
+	$(CCX) $^ -o $(OUT)
 
 clean:
-	rm -f ltc ltc.o ltc_debug
+	rm -f ltc
+
+.PHONY: clean
