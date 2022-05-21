@@ -26,6 +26,7 @@ public:
 	const std::string& file_path(void) const {
 		return path;
 	}
+
 private:
 	/* time: Time the file was created */
 	time_t time;
@@ -217,7 +218,6 @@ struct ProgArgs {
 		time_in_seconds(false)
 	{
 	}
-
 };
 
 static ClientDatabase db;
@@ -258,7 +258,7 @@ static std::vector<LogFile> compile_logs(const std::string &dir)
 			continue;
 		last_slash = file_name.rfind("/");
 		log_ctime = str_to_time(
-			file_name.data() + last_slash + 1,
+			file_name.c_str() + last_slash + 1,
 			"ts3server_%Y-%m-%d__%H_%M_%S");
 		if (log_ctime < 0) {
 			std::cerr
@@ -269,8 +269,7 @@ static std::vector<LogFile> compile_logs(const std::string &dir)
 		}
 		logs.emplace_back(log_ctime, file_name);
 	}
-	/* Ensure the first file we see is the earliest */
-	sort(logs.begin(), logs.end(), std::greater<LogFile>());
+	sort(logs.begin(), logs.end());
 	return logs;
 }
 
@@ -296,10 +295,8 @@ static void get_id(const std::string_view &line, int &id)
 	id_start = line.find("(id:") + std::strlen("(id:");
 	id_end = line.find(")", id_start);
 	auto result = std::from_chars(line.data() + id_start, line.data() + id_end, id);
-	if (result.ec == std::errc::invalid_argument) {
-		std::cout << "Could not convert\n";
-		exit(1);
-	}
+	if (result.ec == std::errc::invalid_argument)
+		id = -1; /* Error will be caught by caller */
 }
 
 /*
