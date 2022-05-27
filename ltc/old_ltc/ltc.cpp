@@ -13,7 +13,9 @@
  */
 class LogFile {
 public:
-	LogFile(time_t t, std::string &n) : time(t), path(std::move(n)) { }
+	LogFile(time_t t, const std::string &n) : time(t), path(n) { }
+
+	LogFile(time_t t, const std::string &&n) : time(t), path(std::move(n)) { }
 
 	bool operator<(const LogFile &b) const {
 		return time < b.time;
@@ -40,14 +42,21 @@ private:
  */
 class Client {
 public:
-	Client(std::string &name, time_t time) :
+	Client(const std::string &nickname, time_t time) :
+		last_time_connected(time),
+		total_time_connected(0),
+		num_conn(1),
+		name(nickname)
+	{ }
+
+	Client(const std::string &&nickname, time_t time) :
 		last_time_connected(time),
 		total_time_connected(0),
 		num_conn(1),
 		name(std::move(name))
 	{ }
 
-	void log_conn(std::string &logged_name, time_t t) {
+	void log_conn(const std::string &&logged_name, time_t t) {
 		/*
 		 * ONLY update the client if this is a fresh connection to
 		 * the server.
@@ -87,9 +96,7 @@ public:
 		}
 	}
 
-	/*
-	 * Reset the client's connection fields.
-	 */
+	/* Reset the client's connection fields */
 	void reset(void) {
 		num_conn = 0;
 		last_time_connected = 0;
@@ -121,7 +128,7 @@ public:
 			secs -= mins * 60;
 			std::cout
 				<< days << "d "
-				<< hrs << "h "
+				<< hrs  << "h "
 				<< mins << "m "
 				<< secs << "s";
 		}
@@ -162,20 +169,23 @@ private:
  * Database of all client connections
  */
 class ClientDatabase {
+	using client_id = unsigned int;
 public:
-	void log_conn(std::string &name, int id, time_t t) {
+	void log_conn(const std::string &&name, client_id id, time_t t) {
 		auto res = client_map.find(id);
 
 		if (res != client_map.end())
-			res->second.log_conn(name, t);
+			res->second.log_conn(std::move(name), t);
 		else
-			client_map.insert(std::pair<int, Client>(id, Client(name, t)));
+			client_map.insert(
+				std::pair<int, Client>(id, Client(std::move(name), t))
+			);
 	}
 
 	/*
 	 * Update client node with duration they were connected
 	 */
-	void log_disconn(int id, time_t t) {
+	void log_disconn(client_id id, time_t t) {
 		auto res = client_map.find(id);
 
 		if (res != client_map.end())
@@ -193,16 +203,16 @@ public:
 			it->second.reset();
 	}
 
-	std::unordered_map<int, Client>::const_iterator begin(void) const {
+	std::unordered_map<client_id, Client>::const_iterator begin(void) const {
 		return client_map.begin();
 	}
 
-	std::unordered_map<int, Client>::const_iterator end(void) const {
+	std::unordered_map<client_id, Client>::const_iterator end(void) const {
 		return client_map.end();
 	}
 private:
 	/* client_map: Unordered mapping of unique client id's to a Client */
-	std::unordered_map<int, Client> client_map;
+	std::unordered_map<client_id, Client> client_map;
 };
 
 struct ProgArgs {
@@ -216,8 +226,7 @@ struct ProgArgs {
 		tail_count(0),
 		head_count(0),
 		time_in_seconds(false)
-	{
-	}
+	{ }
 };
 
 static ClientDatabase db;
@@ -227,19 +236,21 @@ static time_t str_to_time(const char *time_str, const char *fmt)
 {
 	struct tm tm = {0};
 	long tyears, tdays, leaps, utc_hrs;
-	const int mon_days[] = {
-		31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+	/*
+	 * days_past_since_jan[x] = # days past in the year where
+	 * 	x: [0, 11] denoting months since janurary.
+	 */
+	const int days_past_in_year[] = {
+		31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334, 365
 	};
-	int i;
 
 	if (!strptime(time_str, fmt, &tm))
 		return -1;
 
 	tyears = tm.tm_year - 70;
 	leaps = (tyears + 2) / 4;
-	for (i = 0, tdays = 0; i < tm.tm_mon; i++)
-		tdays += mon_days[i];
-
+	/* tm_mon represents num months since janurary (0 - 11) */
+	tdays = tm.tm_mon > 0 ? days_past_in_year[tm.tm_mon - 1] : 0;
 	tdays += tm.tm_mday - 1;
 	tdays = tdays + (tyears * 365) + leaps;
 	utc_hrs = tm.tm_hour + UTC_DIFF;
@@ -267,60 +278,78 @@ static std::vector<LogFile> compile_logs(const std::string &dir)
 				<< "'!\n";
 			exit(1);
 		}
-		logs.emplace_back(log_ctime, file_name);
+		logs.emplace_back(log_ctime, std::move(file_name));
 	}
 	sort(logs.begin(), logs.end());
 	return logs;
 }
 
-enum ClientAction {
-	NO_ACTION,
-	CLIENT_CONNECT,
-	CLIENT_DISCONNECT,
-};
-
 static void get_name(const std::string_view &line, std::string &name)
 {
-	size_t name_start, name_end;
+	size_t name_start, name_end, npos = std::string::npos;
 
+	/*
+	 * Names in the logs are surrounded by ''
+	 */
 	name_start = line.find("'") + 1;
 	name_end = line.find("'", name_start);
+	if (name_start == npos || name_end == npos)
+		throw std::runtime_error("Failed to parse name!");
 	name = line.substr(name_start, name_end - name_start);
 }
 
 static void get_id(const std::string_view &line, int &id)
 {
-	size_t id_start, id_end;
+	size_t id_start, id_end, npos = std::string::npos;
 
+	/*
+	 * ID's in the logs are formatted in the logs like: (id:##)
+	 * where ## is the ID
+	 */
 	id_start = line.find("(id:") + std::strlen("(id:");
 	id_end = line.find(")", id_start);
+	if (id_start == npos || id_end == npos)
+		throw std::runtime_error("Failed to find id on line!");
 	auto result = std::from_chars(line.data() + id_start, line.data() + id_end, id);
 	if (result.ec == std::errc::invalid_argument)
-		id = -1; /* Error will be caught by caller */
+		throw std::runtime_error("Failed to parse id from text!");
 }
+
+enum class ClientAction {
+	NO_ACTION,
+	CLIENT_CONNECT,
+	CLIENT_DISCONNECT,
+};
 
 /*
  * parse_line - parse the action, name, and id of the client in a line
  */
-static enum ClientAction parse_line(const std::string &line, std::string &name, int &id)
+static ClientAction parse_line(const std::string &line, std::string &name, int &id)
 {
-	enum ClientAction a;
+	ClientAction a;
 	size_t pos;
 	std::string_view view;
 
 	pos = line.find("client connected");
 	if (pos != std::string::npos) {
-		a = CLIENT_CONNECT;
+		a = ClientAction::CLIENT_CONNECT;
 		view = std::string_view(line.data() + pos + std::strlen("client connected"));
 	} else {
 		pos = line.find("client disconnected");
 		if (pos == std::string::npos)
-			return NO_ACTION;
+			return ClientAction::NO_ACTION;
 		view = std::string_view(line.data() + pos + std::strlen("client disconnected"));
-		a = CLIENT_DISCONNECT;
+		a = ClientAction::CLIENT_DISCONNECT;
 	}
-	get_name(view, name);
-	get_id(view, id);
+
+	try {
+		get_name(view, name);
+		get_id(view, id);
+	} catch (std::runtime_error &e) {
+		std::cerr << e.what() << '\n';
+		std::cerr << "\tLine that failed: " << line << '\n';
+		a = ClientAction::NO_ACTION;
+	}
 	return a;
 }
 
@@ -336,14 +365,15 @@ static enum ClientAction parse_line(const std::string &line, std::string &name, 
  * Once the line has been completely read, we can use this information
  * to update the client.
  */
-static void process_line(const std::string &line, time_t time_constraint)
+static void process_action_on_line(const std::string &line, time_t time_constraint)
 {
+	ClientAction action;
 	time_t time;
 	std::string client_name;
-	int id = 0, action;
+	int id = 0;
 
 	action = parse_line(line, client_name, id);
-	if (action == NO_ACTION || id == 1)
+	if (action == ClientAction::NO_ACTION || id == 1)
 		return;
 
 	if (id <= 0) {
@@ -355,14 +385,14 @@ static void process_line(const std::string &line, time_t time_constraint)
 		return;
 
 	switch (action) {
-	case CLIENT_CONNECT:
-		db.log_conn(client_name, id, time);
+	case ClientAction::CLIENT_CONNECT:
+		db.log_conn(std::move(client_name), id, time);
 		break;
-	case CLIENT_DISCONNECT:
+	case ClientAction::CLIENT_DISCONNECT:
 		db.log_disconn(id, time);
 		break;
+	case ClientAction::NO_ACTION:
 	default:
-	case NO_ACTION:
 		break;
 	}
 }
@@ -371,7 +401,7 @@ static void parse_file(std::ifstream &file, time_t time_constraint)
 {
 	std::string line;
 	while (std::getline(file, line))
-		process_line(line, time_constraint);
+		process_action_on_line(line, time_constraint);
 }
 
 static void parse_files(const std::vector<LogFile> &logs, struct ProgArgs args)
@@ -464,6 +494,7 @@ int main(int argc, char *argv[])
 
 	for (auto it = db.begin(); it != db.end(); it++)
 		client_vec.push_back(std::move(it->second));
+	/* Want clients in order of greatest to least */
 	sort(client_vec.begin(), client_vec.end(), std::greater<Client>());
 
 	if (args.head_count) {
