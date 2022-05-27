@@ -53,7 +53,7 @@ public:
 		last_time_connected(time),
 		total_time_connected(0),
 		num_conn(1),
-		name(std::move(name))
+		name(std::move(nickname))
 	{ }
 
 	void log_conn(const std::string &&logged_name, time_t t) {
