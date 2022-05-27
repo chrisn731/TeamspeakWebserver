@@ -178,7 +178,7 @@ public:
 			res->second.log_conn(std::move(name), t);
 		else
 			client_map.insert(
-				std::pair<int, Client>(id, Client(std::move(name), t))
+				std::pair<client_id, Client>(id, Client(std::move(name), t))
 			);
 	}
 
